@@ -35,15 +35,15 @@ func (m MockClient) QueueInfo() (*woodpecker.Info, error) {
 // vocabulary, with the server-stamped repo/org-id every real queued task
 // carries (the labels the modeled pool filter must survive).
 func linuxTask() woodpecker.Task {
-	return woodpecker.Task{Labels: map[string]string{"type": "linux", "repo": "sealed/x", "org-id": "1"}}
+	return woodpecker.Task{Labels: map[string]string{"type": "linux", "repo": "rigel/x", "org-id": "1"}}
 }
 
 func heavyTask() woodpecker.Task {
-	return woodpecker.Task{Labels: map[string]string{"type": "linux", "size": "large", "repo": "sealed/x", "org-id": "1"}}
+	return woodpecker.Task{Labels: map[string]string{"type": "linux", "size": "large", "repo": "rigel/x", "org-id": "1"}}
 }
 
 func macTask() woodpecker.Task {
-	return woodpecker.Task{Labels: map[string]string{"type": "macos", "repo": "sealed/x", "org-id": "1"}}
+	return woodpecker.Task{Labels: map[string]string{"type": "macos", "repo": "rigel/x", "org-id": "1"}}
 }
 
 // elasticLabels is the pool's WOODPECKER_AGENT_LABELS in the parent's model.
@@ -355,7 +355,7 @@ func Test_calcAgents(t *testing.T) {
 			ID: 2, Name: "narrowstatic", OrgID: 1, Capacity: 1,
 			CustomLabels: map[string]string{"type": "linux"},
 		}
-		taskOrg2 := woodpecker.Task{Labels: map[string]string{"type": "linux", "repo": "sealed/x", "org-id": "2"}}
+		taskOrg2 := woodpecker.Task{Labels: map[string]string{"type": "linux", "repo": "rigel/x", "org-id": "2"}}
 		autoscaler := Autoscaler{
 			client:    &MockClient{pending: []woodpecker.Task{linuxTask() /* org-id 1 */, taskOrg2}},
 			allAgents: []*woodpecker.Agent{broad, narrow}, // ORDER MATTERS: broad tried first
@@ -477,7 +477,7 @@ func Test_cleanupDanglingAgents(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
-	t.Run("should remove agent that is only present on provider (not woodpecker)", func(t *testing.T) {
+	t.Run("should remove agent that is only present on provider (not woodpecker) once grace has elapsed", func(t *testing.T) {
 		ctx := t.Context()
 		client := mocks_server.NewMockClient(t)
 		provider := mocks_provider.NewMockProvider(t)
@@ -487,6 +487,12 @@ func Test_cleanupDanglingAgents(t *testing.T) {
 			},
 			provider: provider,
 			client:   client,
+			config:   &config.Config{AgentInactivityTimeout: 10 * time.Minute},
+			// Pre-seed the grace clock past the timeout so termination fires
+			// on this pass (mirrors the two-pass grace behavior).
+			danglingSince: map[string]time.Time{
+				"pool-1-agent-2": time.Now().Add(-20 * time.Minute),
+			},
 		}
 
 		provider.On("ListDeployedAgentNames", mock.Anything).Return([]string{"pool-1-agent-1", "pool-1-agent-2"}, nil)
@@ -496,6 +502,114 @@ func Test_cleanupDanglingAgents(t *testing.T) {
 
 		err := autoscaler.cleanupDanglingAgents(ctx)
 		assert.NoError(t, err)
+		_, ok := autoscaler.danglingSince["pool-1-agent-2"]
+		assert.False(t, ok, "danglingSince entry should be cleared after termination")
+	})
+
+	t.Run("should not terminate a provider instance the first pass it is missing (grace)", func(t *testing.T) {
+		ctx := t.Context()
+		client := mocks_server.NewMockClient(t)
+		provider := mocks_provider.NewMockProvider(t)
+		autoscaler := Autoscaler{
+			agents: []*woodpecker.Agent{
+				{ID: 1, Name: "pool-1-agent-1", NoSchedule: false},
+			},
+			provider:      provider,
+			client:        client,
+			config:        &config.Config{AgentInactivityTimeout: 10 * time.Minute},
+			danglingSince: map[string]time.Time{},
+		}
+
+		// No RemoveAgent expectation registered: mockery fails if it is called.
+		provider.On("ListDeployedAgentNames", mock.Anything).Return([]string{"pool-1-agent-1", "pool-1-agent-2"}, nil)
+
+		err := autoscaler.cleanupDanglingAgents(ctx)
+		assert.NoError(t, err)
+		_, ok := autoscaler.danglingSince["pool-1-agent-2"]
+		assert.True(t, ok, "missing instance should get a danglingSince entry on first pass")
+	})
+
+	t.Run("should reset grace when the instance reappears on woodpecker", func(t *testing.T) {
+		ctx := t.Context()
+		client := mocks_server.NewMockClient(t)
+		provider := mocks_provider.NewMockProvider(t)
+		autoscaler := Autoscaler{
+			agents: []*woodpecker.Agent{
+				{ID: 1, Name: "pool-1-agent-1", NoSchedule: false},
+				{ID: 2, Name: "pool-1-agent-2", NoSchedule: false},
+			},
+			provider: provider,
+			client:   client,
+			config:   &config.Config{AgentInactivityTimeout: 10 * time.Minute},
+			danglingSince: map[string]time.Time{
+				"pool-1-agent-2": time.Now().Add(-20 * time.Minute),
+			},
+		}
+
+		// Both provider and woodpecker list the name: no RemoveAgent expected.
+		provider.On("ListDeployedAgentNames", mock.Anything).Return([]string{"pool-1-agent-1", "pool-1-agent-2"}, nil)
+
+		err := autoscaler.cleanupDanglingAgents(ctx)
+		assert.NoError(t, err)
+		_, ok := autoscaler.danglingSince["pool-1-agent-2"]
+		assert.False(t, ok, "danglingSince entry should be cleared when instance reappears")
+	})
+
+	t.Run("should not terminate a still-within-grace instance on a later pass", func(t *testing.T) {
+		ctx := t.Context()
+		client := mocks_server.NewMockClient(t)
+		provider := mocks_provider.NewMockProvider(t)
+		// The clock started 5m ago under a 10m timeout: the instance is missing
+		// but still within its grace window, so this pass must neither terminate
+		// it nor disturb its clock. This guards the grace deferral itself — the
+		// whole point of the grace deferral — which the record/terminate/reappear tests
+		// leave uncovered.
+		started := time.Now().Add(-5 * time.Minute)
+		autoscaler := Autoscaler{
+			agents: []*woodpecker.Agent{
+				{ID: 1, Name: "pool-1-agent-1", NoSchedule: false},
+			},
+			provider:      provider,
+			client:        client,
+			config:        &config.Config{AgentInactivityTimeout: 10 * time.Minute},
+			danglingSince: map[string]time.Time{"pool-1-agent-2": started},
+		}
+
+		// No RemoveAgent expectation registered: mockery fails if it is called.
+		provider.On("ListDeployedAgentNames", mock.Anything).Return([]string{"pool-1-agent-1", "pool-1-agent-2"}, nil)
+
+		err := autoscaler.cleanupDanglingAgents(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, started, autoscaler.danglingSince["pool-1-agent-2"],
+			"within-grace clock must be preserved unchanged (not reset, not fired)")
+	})
+
+	t.Run("should garbage-collect the grace clock when the provider stops listing a still-dangling instance", func(t *testing.T) {
+		ctx := t.Context()
+		client := mocks_server.NewMockClient(t)
+		provider := mocks_provider.NewMockProvider(t)
+		// pool-1-agent-2 was recorded missing-from-woodpecker while still within
+		// grace, then the provider instance itself vanished (out-of-band Spot
+		// reclaim) before the window elapsed. The dangling loop never visits it
+		// again, so its clock must be reaped by the post-loop GC or it leaks
+		// forever.
+		autoscaler := Autoscaler{
+			agents: []*woodpecker.Agent{
+				{ID: 1, Name: "pool-1-agent-1", NoSchedule: false},
+			},
+			provider:      provider,
+			client:        client,
+			config:        &config.Config{AgentInactivityTimeout: 10 * time.Minute},
+			danglingSince: map[string]time.Time{"pool-1-agent-2": time.Now().Add(-5 * time.Minute)},
+		}
+
+		// Provider no longer lists pool-1-agent-2; no RemoveAgent expected.
+		provider.On("ListDeployedAgentNames", mock.Anything).Return([]string{"pool-1-agent-1"}, nil)
+
+		err := autoscaler.cleanupDanglingAgents(ctx)
+		assert.NoError(t, err)
+		_, ok := autoscaler.danglingSince["pool-1-agent-2"]
+		assert.False(t, ok, "grace clock for a vanished provider instance must be garbage-collected, not leaked")
 	})
 }
 

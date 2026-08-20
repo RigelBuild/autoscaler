@@ -12,6 +12,18 @@ var ProviderFlags = []cli.Flag{
 		Sources:  cli.EnvVars("WOODPECKER_AWS_INSTANCE_TYPE"),
 		Category: Category,
 	},
+	&cli.StringSliceFlag{
+		Name:     "aws-instance-types",
+		Usage:    "EC2 instance types, in preference order; >1 requires aws-launch-template-id",
+		Sources:  cli.EnvVars("WOODPECKER_AWS_INSTANCE_TYPES"),
+		Category: Category,
+	},
+	&cli.StringFlag{
+		Name:     "aws-launch-template-id",
+		Usage:    "EC2 launch template id used as the CreateFleet anchor (required for multiple instance types)",
+		Sources:  cli.EnvVars("WOODPECKER_AWS_LAUNCH_TEMPLATE_ID"),
+		Category: Category,
+	},
 	&cli.StringFlag{
 		Name:     "aws-ami-id",
 		Usage:    "AMI id",
