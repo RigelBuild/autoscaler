@@ -1,0 +1,78 @@
+name: publish-image
+
+# Publishes the multi-arch woodpecker-autoscaler image to GHCR for the Rigel
+# elastic-runner pool. The pool's AUTOSCALER_IMAGE pins the exact version tag
+# this workflow produces (ghcr.io/rigelbuild/autoscaler:<version>).
+#
+# The Dockerfile (docker/Dockerfile) builds on the native BUILDPLATFORM and
+# Go-cross-compiles to TARGETARCH (Makefile `build`: CGO_ENABLED=0
+# GOARCH=$TARGETARCH), and its final stage is FROM scratch (COPY-only), so
+# linux/arm64 is produced by cross-compile without QEMU execution. The Makefile
+# stamps version.Version from CI_COMMIT_TAG (strips the leading v).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Image version tag (e.g. 1.5.0-rigel.1)"
+        required: true
+        default: "1.5.0-rigel.1"
+  push:
+    tags:
+      - "v*.*.*-rigel.*"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: rigelbuild/autoscaler
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            ref="${GITHUB_REF#refs/tags/}"
+            version="${ref#v}"
+          else
+            version="${{ github.event.inputs.version }}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Publishing autoscaler image version: ${version}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          build-args: |
+            CI_COMMIT_TAG=v${{ steps.version.outputs.version }}
+            CI_COMMIT_SHA=${{ github.sha }}
+            CI_COMMIT_BRANCH=${{ github.ref_name }}
