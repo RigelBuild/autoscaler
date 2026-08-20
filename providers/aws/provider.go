@@ -22,10 +22,22 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/woodpecker-go/woodpecker"
 )
 
+// EC2Client is the minimal subset of the EC2 API the provider calls. It exists
+// so the deploy paths can be exercised with a generated mock; *ec2.Client
+// satisfies it. It is exported so mockery emits an exported mock (mirroring the
+// hetznercloud hcapi.Client precedent), which the table-driven tests consume.
+type EC2Client interface {
+	RunInstances(ctx context.Context, params *ec2.RunInstancesInput, optFns ...func(*ec2.Options)) (*ec2.RunInstancesOutput, error)
+	CreateFleet(ctx context.Context, params *ec2.CreateFleetInput, optFns ...func(*ec2.Options)) (*ec2.CreateFleetOutput, error)
+	DescribeInstances(ctx context.Context, params *ec2.DescribeInstancesInput, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
+	TerminateInstances(ctx context.Context, params *ec2.TerminateInstancesInput, optFns ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error)
+}
+
 type provider struct {
 	name                  string
 	config                *config.Config
-	instanceType          string
+	instanceTypes         []string
+	launchTemplateID      string
 	amiID                 string
 	tags                  []string
 	region                string
@@ -33,20 +45,45 @@ type provider struct {
 	securityGroups        []string
 	iamInstanceProfileArn string
 	useSpotInstances      bool
-	client                *ec2.Client
+	client                EC2Client
 	lock                  sync.Mutex
 	subnetRR              int
 	sshKeyName            string
+}
+
+// resolveInstanceTypes applies the instance-type precedence: the plural
+// aws-instance-types wins; otherwise the legacy singular aws-instance-type is
+// used as a one-element list (when non-empty). More than one instance type
+// requires a launch template id, since only the CreateFleet path can launch a
+// diversified set.
+func resolveInstanceTypes(instanceTypes []string, legacyInstanceType, launchTemplateID string) ([]string, error) {
+	resolved := instanceTypes
+	if len(resolved) == 0 && legacyInstanceType != "" {
+		resolved = []string{legacyInstanceType}
+	}
+	if len(resolved) > 1 && launchTemplateID == "" {
+		return nil, fmt.Errorf("aws-launch-template-id must be set when more than one aws-instance-types is configured")
+	}
+	if launchTemplateID != "" && len(resolved) == 0 {
+		return nil, fmt.Errorf("aws-instance-types (or aws-instance-type) must be set when aws-launch-template-id is configured")
+	}
+	return resolved, nil
 }
 
 func New(ctx context.Context, c *cli.Command, config *config.Config) (types.Provider, error) {
 	if len(c.StringSlice("aws-subnets")) == 0 {
 		return nil, fmt.Errorf("aws-subnets must be set")
 	}
+	launchTemplateID := c.String("aws-launch-template-id")
+	instanceTypes, err := resolveInstanceTypes(c.StringSlice("aws-instance-types"), c.String("aws-instance-type"), launchTemplateID)
+	if err != nil {
+		return nil, err
+	}
 	p := &provider{
 		name:                  "aws",
 		config:                config,
-		instanceType:          c.String("aws-instance-type"),
+		instanceTypes:         instanceTypes,
+		launchTemplateID:      launchTemplateID,
 		amiID:                 c.String("aws-ami-id"),
 		tags:                  c.StringSlice("aws-tags"),
 		region:                c.String("aws-region"),
@@ -99,12 +136,29 @@ func (p *provider) DeployAgent(ctx context.Context, agent *woodpecker.Agent) err
 		tags = append(tags, rt)
 	}
 
+	encodedUserData := aws.String(b64.StdEncoding.EncodeToString([]byte(userData)))
+
+	// A launch template anchors the CreateFleet path, which can span multiple
+	// instance types. Without a template the original single-type RunInstances
+	// path is used unchanged.
+	if p.launchTemplateID != "" {
+		return p.deployFleet(ctx, agent, encodedUserData, tags)
+	}
+	return p.deployRunInstances(ctx, agent, encodedUserData, tags)
+}
+
+func (p *provider) deployRunInstances(ctx context.Context, agent *woodpecker.Agent, encodedUserData *string, tags []ec2_types.Tag) error {
+	var instanceType string
+	if len(p.instanceTypes) > 0 {
+		instanceType = p.instanceTypes[0]
+	}
+
 	runInstancesInput := ec2.RunInstancesInput{
 		IamInstanceProfile: &ec2_types.IamInstanceProfileSpecification{
 			Arn: aws.String(p.iamInstanceProfileArn),
 		},
 		ImageId:      aws.String(p.amiID),
-		InstanceType: ec2_types.InstanceType(p.instanceType),
+		InstanceType: ec2_types.InstanceType(instanceType),
 		MetadataOptions: &ec2_types.InstanceMetadataOptionsRequest{
 			HttpEndpoint:            ec2_types.InstanceMetadataEndpointStateEnabled,
 			HttpPutResponseHopLimit: aws.Int32(1),
@@ -141,15 +195,116 @@ func (p *provider) DeployAgent(ctx context.Context, agent *woodpecker.Agent) err
 		runInstancesInput.KeyName = aws.String(p.sshKeyName)
 	}
 
-	runInstancesInput.UserData = aws.String(b64.StdEncoding.EncodeToString([]byte(userData)))
+	runInstancesInput.UserData = encodedUserData
 	result, err := p.client.RunInstances(ctx, &runInstancesInput)
 	if err != nil {
 		return fmt.Errorf("%s: RunInstances: %w", p.name, err)
 	}
 
+	return p.waitForAgent(ctx, agent, *result.Instances[0].InstanceId)
+}
+
+func (p *provider) deployFleet(ctx context.Context, agent *woodpecker.Agent, encodedUserData *string, tags []ec2_types.Tag) error {
+	// IMDSv2-required metadata options, in the Fleet-prefixed request shape
+	// (distinct from the RunInstances *InstanceMetadataOptionsRequest). Shared
+	// read-only across every override.
+	metadataOptions := &ec2_types.FleetInstanceMetadataOptionsRequest{
+		HttpEndpoint:            ec2_types.FleetInstanceMetadataEndpointStateEnabled,
+		HttpPutResponseHopLimit: aws.Int32(1),
+		HttpTokens:              ec2_types.FleetHttpTokensStateRequired,
+	}
+
+	// Full cross-product of instance types x subnets. This supersedes the
+	// RunInstances subnet round-robin: AWS picks the deepest-cheapest (type, AZ)
+	// pool atomically. Security groups have no override field on an instant
+	// fleet; they are sourced from the launch template.
+	overrides := make([]ec2_types.FleetLaunchTemplateOverridesRequest, 0, len(p.instanceTypes)*len(p.subnets))
+	for _, instanceType := range p.instanceTypes {
+		for _, subnet := range p.subnets {
+			override := ec2_types.FleetLaunchTemplateOverridesRequest{
+				InstanceType: ec2_types.InstanceType(instanceType),
+				SubnetId:     aws.String(subnet),
+				ImageId:      aws.String(p.amiID),
+				IamInstanceProfile: &ec2_types.FleetIamInstanceProfileSpecificationRequest{
+					Arn: aws.String(p.iamInstanceProfileArn),
+				},
+				MetadataOptions: metadataOptions,
+			}
+			// Only attach a key pair when one is configured; aws.String("") is a
+			// nonexistent key pair and fails every launch.
+			if p.sshKeyName != "" {
+				override.KeyName = aws.String(p.sshKeyName)
+			}
+			overrides = append(overrides, override)
+		}
+	}
+
+	// The capacity type selects the market, mirroring the RunInstances
+	// InstanceMarketOptions gate; omitting SpotOptions alone would still request
+	// Spot, so both switch on useSpotInstances.
+	targetCapacityType := ec2_types.DefaultTargetCapacityTypeOnDemand
+	if p.useSpotInstances {
+		targetCapacityType = ec2_types.DefaultTargetCapacityTypeSpot
+	}
+
+	createFleetInput := ec2.CreateFleetInput{
+		Type: ec2_types.FleetTypeInstant,
+		TargetCapacitySpecification: &ec2_types.TargetCapacitySpecificationRequest{
+			TotalTargetCapacity:       aws.Int32(1),
+			DefaultTargetCapacityType: targetCapacityType,
+		},
+		LaunchTemplateConfigs: []ec2_types.FleetLaunchTemplateConfigRequest{
+			{
+				LaunchTemplateSpecification: &ec2_types.FleetLaunchTemplateSpecificationRequest{
+					LaunchTemplateId:                    aws.String(p.launchTemplateID),
+					Version:                             aws.String("$Default"),
+					LaunchTemplateSpecificationUserData: encodedUserData,
+				},
+				Overrides: overrides,
+			},
+		},
+		TagSpecifications: []ec2_types.TagSpecification{
+			{
+				ResourceType: "instance",
+				Tags:         tags,
+			},
+			{
+				ResourceType: "volume",
+				Tags:         tags,
+			},
+		},
+	}
+
+	if p.useSpotInstances {
+		createFleetInput.SpotOptions = &ec2_types.SpotOptionsRequest{
+			AllocationStrategy: ec2_types.SpotAllocationStrategyPriceCapacityOptimized,
+		}
+	}
+
+	out, err := p.client.CreateFleet(ctx, &createFleetInput)
+	if err != nil {
+		return fmt.Errorf("%s: CreateFleet: %w", p.name, err)
+	}
+
+	// instant fleets report per-launch failures in out.Errors with err == nil,
+	// and a partial result can populate both Instances and Errors even at
+	// capacity 1. The failure predicate is therefore an empty Instances list,
+	// not a non-empty Errors list.
+	if len(out.Instances) == 0 || len(out.Instances[0].InstanceIds) == 0 {
+		if len(out.Errors) > 0 {
+			return fmt.Errorf("%s: CreateFleet: %s: %s", p.name,
+				aws.ToString(out.Errors[0].ErrorCode), aws.ToString(out.Errors[0].ErrorMessage))
+		}
+		return fmt.Errorf("%s: CreateFleet: no instances launched", p.name)
+	}
+
+	return p.waitForAgent(ctx, agent, out.Instances[0].InstanceIds[0])
+}
+
+func (p *provider) waitForAgent(ctx context.Context, agent *woodpecker.Agent, instanceID string) error {
 	// Wait until instance is available. Sometimes it can take a second or two for the tag based
 	// filter to show the instance we just created in AWS
-	log.Debug().Msgf("waiting for instance %s", *result.Instances[0].InstanceId)
+	log.Debug().Msgf("waiting for instance %s", instanceID)
 	for range 5 {
 		agents, err := p.ListDeployedAgentNames(ctx)
 		if err != nil {
@@ -166,7 +321,7 @@ func (p *provider) DeployAgent(ctx context.Context, agent *woodpecker.Agent) err
 		time.Sleep(1 * time.Second)
 	}
 
-	return fmt.Errorf("instance did not resolve in agent list: %s", *result.Instances[0].InstanceId)
+	return fmt.Errorf("instance did not resolve in agent list: %s", instanceID)
 }
 
 func (p *provider) getAgent(ctx context.Context, agent *woodpecker.Agent) (*ec2_types.Instance, error) {

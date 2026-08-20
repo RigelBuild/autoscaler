@@ -34,6 +34,21 @@ type Autoscaler struct {
 	allAgents []*woodpecker.Agent
 	config    *config.Config
 	provider  types.Provider
+	// danglingSince records, per provider instance name, when it first went
+	// missing from the woodpecker agent list. cleanupDanglingAgents defers
+	// terminating a missing instance until it has been absent past
+	// AgentInactivityTimeout, so a transient woodpecker server restart (which
+	// briefly drops every agent's gRPC session at once) does not trigger
+	// immediate mass-termination of still-busy agents.
+	//
+	// The clock is process-local: NewAutoscaler reinitializes it, so an
+	// autoscaler restart resets every grace window and grants a genuinely
+	// dangling instance another full AgentInactivityTimeout before it is
+	// reaped. That errs fail-safe (toward not terminating a possibly-busy
+	// agent). AgentInactivityTimeout is intentionally reused as the
+	// absence-grace window to stay in parity with cleanupStaleAgents, which
+	// anchors its own grace on server-reported agent timestamps.
+	danglingSince map[string]time.Time
 }
 
 // NewAutoscaler creates a new Autoscaler instance.
@@ -41,9 +56,10 @@ type Autoscaler struct {
 // Autoscaler struct.
 func NewAutoscaler(p types.Provider, client server.Client, config *config.Config) Autoscaler {
 	return Autoscaler{
-		provider: p,
-		client:   client,
-		config:   config,
+		provider:      p,
+		client:        client,
+		config:        config,
+		danglingSince: make(map[string]time.Time),
 	}
 }
 
@@ -283,6 +299,19 @@ func (a *Autoscaler) cleanupDanglingAgents(ctx context.Context) error {
 		return err
 	}
 
+	// Snapshot the provider's current instance names so danglingSince can be
+	// garbage-collected below. A name enters danglingSince while it is on the
+	// provider but missing from woodpecker; if the provider instance then
+	// disappears entirely (e.g. an out-of-band Spot reclaim) before its grace
+	// window elapses, the loop below never visits it again — so without this
+	// its entry would leak forever. Names are randomized per create, so the
+	// leak is unbounded over the process lifetime, not bounded by pool size
+	// (transient-restart grace).
+	currentProviderNames := make(map[string]struct{}, len(providerAgentNames))
+	for _, name := range providerAgentNames {
+		currentProviderNames[name] = struct{}{}
+	}
+
 	// remove agents that are not in the woodpecker agent list anymore
 	for _, agentName := range providerAgentNames {
 		found := false
@@ -293,20 +322,50 @@ func (a *Autoscaler) cleanupDanglingAgents(ctx context.Context) error {
 			}
 		}
 
-		if !found {
-			log.Info().Str("agent", agentName).Str("reason", "not found on woodpecker").Msg("remove agent")
-			if err := a.provider.RemoveAgent(ctx, &woodpecker.Agent{Name: agentName}); err != nil {
-				return fmt.Errorf("types.RemoveAgent: %w", err)
-			}
+		if found {
+			// Instance is healthy / reappeared: reset any grace clock.
+			delete(a.danglingSince, agentName)
+			continue
+		}
 
-			// remove agent from providerAgentNames
-			_providerAgentNames := make([]string, 0)
-			for _, a := range providerAgentNames {
-				if a != agentName {
-					_providerAgentNames = append(_providerAgentNames, a)
-				}
+		// Instance is missing from the woodpecker agent list. Apply grace
+		// parity with cleanupStaleAgents: don't terminate on the first missing
+		// pass, so a transient woodpecker server restart (which briefly drops
+		// every agent's gRPC session at once) is tolerated.
+		since := a.danglingSince[agentName]
+		if since.IsZero() {
+			a.danglingSince[agentName] = time.Now()
+			log.Info().Str("agent", agentName).Str("reason", "not found on woodpecker").Msg("deferring agent removal pending grace window")
+			continue
+		}
+
+		if time.Since(since) <= a.config.AgentInactivityTimeout {
+			continue
+		}
+
+		log.Info().Str("agent", agentName).Str("reason", "not found on woodpecker").Msg("remove agent")
+		if err := a.provider.RemoveAgent(ctx, &woodpecker.Agent{Name: agentName}); err != nil {
+			return fmt.Errorf("types.RemoveAgent: %w", err)
+		}
+		delete(a.danglingSince, agentName)
+
+		// remove agent from providerAgentNames
+		_providerAgentNames := make([]string, 0)
+		for _, name := range providerAgentNames {
+			if name != agentName {
+				_providerAgentNames = append(_providerAgentNames, name)
 			}
-			providerAgentNames = _providerAgentNames
+		}
+		providerAgentNames = _providerAgentNames
+	}
+
+	// Garbage-collect grace clocks for instances the provider no longer lists
+	// at all (terminated out-of-band mid-grace): the loop above only clears
+	// entries on the reappear or past-grace-terminate paths, so an instance
+	// that vanishes from the provider before its window elapses would leak.
+	for name := range a.danglingSince {
+		if _, ok := currentProviderNames[name]; !ok {
+			delete(a.danglingSince, name)
 		}
 	}
 
