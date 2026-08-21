@@ -267,6 +267,57 @@ func Test_calcAgents(t *testing.T) {
 		assert.Equal(t, float64(0), value, "live static slot still absorbs the shared-eligible task")
 	})
 
+	t.Run("never-contacted non-pool agent falls back to Created: recent ⇒ credited", func(t *testing.T) {
+		// LastContact==0 (agent has a persisted row but never reported in) ⇒ the
+		// gate falls back to Created, mirroring cleanupStaleAgents. A row created
+		// just now is within the window ⇒ its slot still absorbs the task.
+		staticAgent := &woodpecker.Agent{
+			ID: 99, Name: "mattserver", OrgID: -1, Capacity: 1,
+			CustomLabels: map[string]string{"type": "linux", "size": "large"},
+			LastContact:  0,
+			Created:      time.Now().Add(-1 * time.Minute).Unix(),
+		}
+		autoscaler := Autoscaler{
+			client:    &MockClient{pending: []woodpecker.Task{linuxTask()}},
+			allAgents: []*woodpecker.Agent{staticAgent},
+			config: &config.Config{
+				WorkflowsPerAgent:      1,
+				MaxAgents:              8,
+				PoolID:                 "1",
+				ExtraAgentLabels:       elasticLabels(),
+				AgentInactivityTimeout: 10 * time.Minute,
+			},
+		}
+
+		value, _ := autoscaler.calcAgents(t.Context())
+		assert.Equal(t, float64(0), value, "LastContact==0 falls back to a recent Created ⇒ live ⇒ slot credited")
+	})
+
+	t.Run("never-contacted non-pool agent falls back to Created: stale ⇒ not credited", func(t *testing.T) {
+		// Same LastContact==0 fallback, but Created is older than the window ⇒
+		// the agent is treated as dead and its phantom slot must not net the task.
+		staticAgent := &woodpecker.Agent{
+			ID: 99, Name: "mattserver", OrgID: -1, Capacity: 1,
+			CustomLabels: map[string]string{"type": "linux", "size": "large"},
+			LastContact:  0,
+			Created:      time.Now().Add(-20 * time.Minute).Unix(),
+		}
+		autoscaler := Autoscaler{
+			client:    &MockClient{pending: []woodpecker.Task{linuxTask()}},
+			allAgents: []*woodpecker.Agent{staticAgent},
+			config: &config.Config{
+				WorkflowsPerAgent:      1,
+				MaxAgents:              8,
+				PoolID:                 "1",
+				ExtraAgentLabels:       elasticLabels(),
+				AgentInactivityTimeout: 10 * time.Minute,
+			},
+		}
+
+		value, _ := autoscaler.calcAgents(t.Context())
+		assert.Equal(t, float64(1), value, "LastContact==0 falls back to a stale Created ⇒ dead ⇒ phantom slot not netted ⇒ pool scales")
+	})
+
 	t.Run("static agent that can't run the task does not net it out", func(t *testing.T) {
 		// A free macOS static agent cannot absorb a bare-linux task ⇒ counted.
 		macStatic := &woodpecker.Agent{
