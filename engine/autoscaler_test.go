@@ -173,15 +173,17 @@ func Test_calcAgents(t *testing.T) {
 		staticAgent := &woodpecker.Agent{
 			ID: 99, Name: "mattserver", OrgID: -1, Capacity: 1,
 			CustomLabels: map[string]string{"type": "linux", "size": "large"},
+			LastContact:  time.Now().Unix(),
 		}
 		autoscaler := Autoscaler{
 			client:    &MockClient{pending: []woodpecker.Task{linuxTask()}},
 			allAgents: []*woodpecker.Agent{staticAgent},
 			config: &config.Config{
-				WorkflowsPerAgent: 1,
-				MaxAgents:         8,
-				PoolID:            "1",
-				ExtraAgentLabels:  elasticLabels(),
+				WorkflowsPerAgent:      1,
+				MaxAgents:              8,
+				PoolID:                 "1",
+				ExtraAgentLabels:       elasticLabels(),
+				AgentInactivityTimeout: 10 * time.Minute,
 			},
 		}
 
@@ -195,6 +197,7 @@ func Test_calcAgents(t *testing.T) {
 		staticAgent := &woodpecker.Agent{
 			ID: 99, Name: "mattserver", OrgID: -1, Capacity: 1,
 			CustomLabels: map[string]string{"type": "linux", "size": "large"},
+			LastContact:  time.Now().Unix(),
 		}
 		autoscaler := Autoscaler{
 			client: &MockClient{
@@ -203,10 +206,11 @@ func Test_calcAgents(t *testing.T) {
 			},
 			allAgents: []*woodpecker.Agent{staticAgent},
 			config: &config.Config{
-				WorkflowsPerAgent: 1,
-				MaxAgents:         8,
-				PoolID:            "1",
-				ExtraAgentLabels:  elasticLabels(),
+				WorkflowsPerAgent:      1,
+				MaxAgents:              8,
+				PoolID:                 "1",
+				ExtraAgentLabels:       elasticLabels(),
+				AgentInactivityTimeout: 10 * time.Minute,
 			},
 		}
 
@@ -214,20 +218,122 @@ func Test_calcAgents(t *testing.T) {
 		assert.Equal(t, float64(1), value, "busy static can't absorb ⇒ pool scales")
 	})
 
+	t.Run("stale non-pool agent is not credited ⇒ pool scales (offline-builder redundancy)", func(t *testing.T) {
+		// A cleanly-offline static agent's row persists (capacity 1, idle,
+		// NoSchedule=false) but its last contact is older than the inactivity
+		// window ⇒ its phantom slot must NOT net out the pending task.
+		staticAgent := &woodpecker.Agent{
+			ID: 99, Name: "mattserver", OrgID: -1, Capacity: 1,
+			CustomLabels: map[string]string{"type": "linux", "size": "large"},
+			LastContact:  time.Now().Add(-20 * time.Minute).Unix(),
+		}
+		autoscaler := Autoscaler{
+			client:    &MockClient{pending: []woodpecker.Task{linuxTask()}},
+			allAgents: []*woodpecker.Agent{staticAgent},
+			config: &config.Config{
+				WorkflowsPerAgent:      1,
+				MaxAgents:              8,
+				PoolID:                 "1",
+				ExtraAgentLabels:       elasticLabels(),
+				AgentInactivityTimeout: 10 * time.Minute,
+			},
+		}
+
+		value, _ := autoscaler.calcAgents(t.Context())
+		assert.Equal(t, float64(1), value, "stale static agent's phantom slot must not be netted ⇒ pool scales")
+	})
+
+	t.Run("fresh non-pool agent still credited ⇒ no scale-up (healthy-primary path intact)", func(t *testing.T) {
+		// Same static agent, contacted just now ⇒ live, so its free slot still
+		// absorbs the pending task and the pool does not scale.
+		staticAgent := &woodpecker.Agent{
+			ID: 99, Name: "mattserver", OrgID: -1, Capacity: 1,
+			CustomLabels: map[string]string{"type": "linux", "size": "large"},
+			LastContact:  time.Now().Unix(),
+		}
+		autoscaler := Autoscaler{
+			client:    &MockClient{pending: []woodpecker.Task{linuxTask()}},
+			allAgents: []*woodpecker.Agent{staticAgent},
+			config: &config.Config{
+				WorkflowsPerAgent:      1,
+				MaxAgents:              8,
+				PoolID:                 "1",
+				ExtraAgentLabels:       elasticLabels(),
+				AgentInactivityTimeout: 10 * time.Minute,
+			},
+		}
+
+		value, _ := autoscaler.calcAgents(t.Context())
+		assert.Equal(t, float64(0), value, "live static slot still absorbs the shared-eligible task")
+	})
+
+	t.Run("never-contacted non-pool agent falls back to Created: recent ⇒ credited", func(t *testing.T) {
+		// LastContact==0 (agent has a persisted row but never reported in) ⇒ the
+		// gate falls back to Created, mirroring cleanupStaleAgents. A row created
+		// just now is within the window ⇒ its slot still absorbs the task.
+		staticAgent := &woodpecker.Agent{
+			ID: 99, Name: "mattserver", OrgID: -1, Capacity: 1,
+			CustomLabels: map[string]string{"type": "linux", "size": "large"},
+			LastContact:  0,
+			Created:      time.Now().Add(-1 * time.Minute).Unix(),
+		}
+		autoscaler := Autoscaler{
+			client:    &MockClient{pending: []woodpecker.Task{linuxTask()}},
+			allAgents: []*woodpecker.Agent{staticAgent},
+			config: &config.Config{
+				WorkflowsPerAgent:      1,
+				MaxAgents:              8,
+				PoolID:                 "1",
+				ExtraAgentLabels:       elasticLabels(),
+				AgentInactivityTimeout: 10 * time.Minute,
+			},
+		}
+
+		value, _ := autoscaler.calcAgents(t.Context())
+		assert.Equal(t, float64(0), value, "LastContact==0 falls back to a recent Created ⇒ live ⇒ slot credited")
+	})
+
+	t.Run("never-contacted non-pool agent falls back to Created: stale ⇒ not credited", func(t *testing.T) {
+		// Same LastContact==0 fallback, but Created is older than the window ⇒
+		// the agent is treated as dead and its phantom slot must not net the task.
+		staticAgent := &woodpecker.Agent{
+			ID: 99, Name: "mattserver", OrgID: -1, Capacity: 1,
+			CustomLabels: map[string]string{"type": "linux", "size": "large"},
+			LastContact:  0,
+			Created:      time.Now().Add(-20 * time.Minute).Unix(),
+		}
+		autoscaler := Autoscaler{
+			client:    &MockClient{pending: []woodpecker.Task{linuxTask()}},
+			allAgents: []*woodpecker.Agent{staticAgent},
+			config: &config.Config{
+				WorkflowsPerAgent:      1,
+				MaxAgents:              8,
+				PoolID:                 "1",
+				ExtraAgentLabels:       elasticLabels(),
+				AgentInactivityTimeout: 10 * time.Minute,
+			},
+		}
+
+		value, _ := autoscaler.calcAgents(t.Context())
+		assert.Equal(t, float64(1), value, "LastContact==0 falls back to a stale Created ⇒ dead ⇒ phantom slot not netted ⇒ pool scales")
+	})
+
 	t.Run("static agent that can't run the task does not net it out", func(t *testing.T) {
 		// A free macOS static agent cannot absorb a bare-linux task ⇒ counted.
 		macStatic := &woodpecker.Agent{
 			ID: 77, Name: "macmini", OrgID: -1, Capacity: 2,
 			CustomLabels: map[string]string{"type": "macos"},
+			LastContact:  time.Now().Unix(),
 		}
 		autoscaler := Autoscaler{
 			client:    &MockClient{pending: []woodpecker.Task{linuxTask()}},
 			allAgents: []*woodpecker.Agent{macStatic},
 			config: &config.Config{
-				WorkflowsPerAgent: 1,
-				MaxAgents:         8,
-				PoolID:            "1",
-				ExtraAgentLabels:  elasticLabels(),
+				WorkflowsPerAgent:      1,
+				MaxAgents:              8,
+				PoolID:                 "1",
+				ExtraAgentLabels:       elasticLabels(),
+				AgentInactivityTimeout: 10 * time.Minute,
 			},
 		}
 
@@ -296,15 +402,17 @@ func Test_calcAgents(t *testing.T) {
 		staticAgent := &woodpecker.Agent{
 			ID: 99, Name: "mattserver", OrgID: -1, Capacity: 1, NoSchedule: true,
 			CustomLabels: map[string]string{"type": "linux"},
+			LastContact:  time.Now().Unix(),
 		}
 		autoscaler := Autoscaler{
 			client:    &MockClient{pending: []woodpecker.Task{linuxTask()}},
 			allAgents: []*woodpecker.Agent{staticAgent},
 			config: &config.Config{
-				WorkflowsPerAgent: 1,
-				MaxAgents:         8,
-				PoolID:            "1",
-				ExtraAgentLabels:  elasticLabels(),
+				WorkflowsPerAgent:      1,
+				MaxAgents:              8,
+				PoolID:                 "1",
+				ExtraAgentLabels:       elasticLabels(),
+				AgentInactivityTimeout: 10 * time.Minute,
 			},
 		}
 
@@ -318,15 +426,17 @@ func Test_calcAgents(t *testing.T) {
 		staticAgent := &woodpecker.Agent{
 			ID: 99, Name: "mattserver", OrgID: -1, Capacity: 2,
 			CustomLabels: map[string]string{"type": "linux"},
+			LastContact:  time.Now().Unix(),
 		}
 		autoscaler := Autoscaler{
 			client:    &MockClient{pending: []woodpecker.Task{linuxTask(), linuxTask()}},
 			allAgents: []*woodpecker.Agent{staticAgent},
 			config: &config.Config{
-				WorkflowsPerAgent: 1,
-				MaxAgents:         8,
-				PoolID:            "1",
-				ExtraAgentLabels:  elasticLabels(),
+				WorkflowsPerAgent:      1,
+				MaxAgents:              8,
+				PoolID:                 "1",
+				ExtraAgentLabels:       elasticLabels(),
+				AgentInactivityTimeout: 10 * time.Minute,
 			},
 		}
 
@@ -350,20 +460,23 @@ func Test_calcAgents(t *testing.T) {
 		broad := &woodpecker.Agent{
 			ID: 1, Name: "broadstatic", OrgID: -1, Capacity: 1,
 			CustomLabels: map[string]string{"type": "linux"},
+			LastContact:  time.Now().Unix(),
 		}
 		narrow := &woodpecker.Agent{
 			ID: 2, Name: "narrowstatic", OrgID: 1, Capacity: 1,
 			CustomLabels: map[string]string{"type": "linux"},
+			LastContact:  time.Now().Unix(),
 		}
 		taskOrg2 := woodpecker.Task{Labels: map[string]string{"type": "linux", "repo": "rigel/x", "org-id": "2"}}
 		autoscaler := Autoscaler{
 			client:    &MockClient{pending: []woodpecker.Task{linuxTask() /* org-id 1 */, taskOrg2}},
 			allAgents: []*woodpecker.Agent{broad, narrow}, // ORDER MATTERS: broad tried first
 			config: &config.Config{
-				WorkflowsPerAgent: 1,
-				MaxAgents:         8,
-				PoolID:            "1",
-				ExtraAgentLabels:  elasticLabels(),
+				WorkflowsPerAgent:      1,
+				MaxAgents:              8,
+				PoolID:                 "1",
+				ExtraAgentLabels:       elasticLabels(),
+				AgentInactivityTimeout: 10 * time.Minute,
 			},
 		}
 
