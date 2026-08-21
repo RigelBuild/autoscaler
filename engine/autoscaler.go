@@ -494,6 +494,18 @@ func (a *Autoscaler) nonPoolFreeSlots(running []woodpecker.Task) []*freeStaticSl
 		if agent.NoSchedule {
 			continue // draining/quarantined — cannot take new work
 		}
+		// A cleanly-offline agent's server row persists (Capacity>0, zero running,
+		// NoSchedule=false) and would otherwise credit phantom free slots that net
+		// out real pending demand — so the pool never scales to cover a dead
+		// static agent. Skip an agent whose last contact is stale, mirroring the
+		// liveness window cleanupStaleAgents already enforces.
+		lastContact := agent.LastContact
+		if lastContact == 0 {
+			lastContact = agent.Created
+		}
+		if time.Since(time.Unix(lastContact, 0)) > a.config.AgentInactivityTimeout {
+			continue
+		}
 		free := int(agent.Capacity) - assigned[agent.ID]
 		if free <= 0 {
 			continue
