@@ -234,24 +234,109 @@ func TestRequiredLabelsMissing(t *testing.T) {
 // configured WOODPECKER_AGENT_LABELS, so server-stamped task labels do not make
 // every task unmatchable.
 func TestNewPoolFilter(t *testing.T) {
-	f := NewPoolFilter(map[string]string{"type": "linux", "pool": "elastic"})
+	f := NewPoolFilter(map[string]string{"type": "linux", "pool": "elastic"}, "")
 	assert.Equal(t, "*", f.labels[pipeline.LabelFilterRepo], "repo default synthesized")
 	assert.Equal(t, "*", f.labels[pipeline.LabelFilterOrg], "org-id default synthesized")
 	assert.Equal(t, "linux", f.labels["type"])
 	assert.Equal(t, "elastic", f.labels["pool"])
 
 	t.Run("nil extra still synthesizes defaults", func(t *testing.T) {
-		f := NewPoolFilter(nil)
+		f := NewPoolFilter(nil, "")
 		assert.Equal(t, "*", f.labels[pipeline.LabelFilterRepo])
 		assert.Equal(t, "*", f.labels[pipeline.LabelFilterOrg])
 	})
 
 	t.Run("custom label overrides repo default", func(t *testing.T) {
-		f := NewPoolFilter(map[string]string{"repo": "sealed/only"})
+		f := NewPoolFilter(map[string]string{"repo": "sealed/only"}, "")
 		assert.Equal(t, "sealed/only", f.labels[pipeline.LabelFilterRepo])
 		// org-id stays server-enforced "*" for system agents
 		assert.Equal(t, "*", f.labels[pipeline.LabelFilterOrg])
 	})
+
+	t.Run("empty platform synthesizes no platform key", func(t *testing.T) {
+		f := NewPoolFilter(map[string]string{"type": "linux"}, "")
+		_, ok := f.labels[pipeline.LabelFilterPlatform]
+		assert.False(t, ok, "an unconfigured pool must not assert a platform it cannot know")
+	})
+}
+
+// TestNewPoolFilterPlatform is the platform-synthesis table. It is deliberately
+// separate from TestMatchFilter, which is a verbatim transliteration of the
+// upstream scheduler's own table and must not gain local cases — this one
+// exercises our synthesis through the same (agent labels ⇒ verdict) shape, via
+// the public Satisfiable path.
+//
+// A real agent self-reports platform (cmd/agent/core/agent.go) before its
+// custom labels; the model has no agent, so NewPoolFilter must synthesize it
+// from config.PoolPlatform or every platform-keyed task looks unrunnable.
+func TestNewPoolFilterPlatform(t *testing.T) {
+	tests := []struct {
+		name         string
+		extra        map[string]string
+		poolPlatform string
+		taskLabels   map[string]string
+		wantMatched  bool
+	}{
+		{
+			name:         "matching platform request matches when PoolPlatform is set",
+			extra:        map[string]string{"builder": "image"},
+			poolPlatform: "linux/arm64",
+			taskLabels:   map[string]string{"builder": "image", "platform": "linux/arm64", "repo": "rigel/x", "org-id": "1"},
+			wantMatched:  true,
+		},
+		{
+			name:         "non-matching platform request does not match",
+			extra:        map[string]string{"builder": "image"},
+			poolPlatform: "linux/arm64",
+			taskLabels:   map[string]string{"builder": "image", "platform": "linux/amd64", "repo": "rigel/x", "org-id": "1"},
+			wantMatched:  false,
+		},
+		{
+			// Today's behavior, preserved exactly: with no platform key on the
+			// modeled agent, matchFilter hard-rejects any task label the agent
+			// does not carry, so a platform-requesting task is unmatchable.
+			name:         "empty PoolPlatform: platform-requesting task is unmatchable",
+			extra:        map[string]string{"builder": "image"},
+			poolPlatform: "",
+			taskLabels:   map[string]string{"builder": "image", "platform": "linux/arm64", "repo": "rigel/x", "org-id": "1"},
+			wantMatched:  false,
+		},
+		{
+			name:         "empty PoolPlatform: a task not requesting platform is unaffected",
+			extra:        map[string]string{"builder": "image"},
+			poolPlatform: "",
+			taskLabels:   map[string]string{"builder": "image", "repo": "rigel/x", "org-id": "1"},
+			wantMatched:  true,
+		},
+		{
+			name:         "explicit ExtraAgentLabels platform overrides the synthesized default",
+			extra:        map[string]string{"builder": "image", "platform": "linux/amd64"},
+			poolPlatform: "linux/arm64",
+			taskLabels:   map[string]string{"builder": "image", "platform": "linux/amd64", "repo": "rigel/x", "org-id": "1"},
+			wantMatched:  true,
+		},
+		{
+			name:         "explicit ExtraAgentLabels platform wins, so the synthesized value no longer matches",
+			extra:        map[string]string{"builder": "image", "platform": "linux/amd64"},
+			poolPlatform: "linux/arm64",
+			taskLabels:   map[string]string{"builder": "image", "platform": "linux/arm64", "repo": "rigel/x", "org-id": "1"},
+			wantMatched:  false,
+		},
+		{
+			name:         "org-id stays server-enforced under an explicit override attempt",
+			extra:        map[string]string{"builder": "image", "org-id": "7"},
+			poolPlatform: "linux/arm64",
+			taskLabels:   map[string]string{"builder": "image", "platform": "linux/arm64", "repo": "rigel/x", "org-id": "1"},
+			wantMatched:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := NewPoolFilter(tt.extra, tt.poolPlatform)
+			assert.Equal(t, tt.wantMatched, f.Satisfiable(woodpecker.Task{Labels: tt.taskLabels}), "Matched result")
+		})
+	}
 }
 
 // TestSatisfiableWorkedExamples is the three worked examples from the design,
@@ -259,7 +344,7 @@ func TestNewPoolFilter(t *testing.T) {
 // on every task (the case the synthesis exists to survive).
 func TestSatisfiableWorkedExamples(t *testing.T) {
 	// pool advertises type=linux,pool=elastic (its WOODPECKER_AGENT_LABELS)
-	pool := NewPoolFilter(map[string]string{"type": "linux", "pool": "elastic"})
+	pool := NewPoolFilter(map[string]string{"type": "linux", "pool": "elastic"}, "")
 
 	t.Run("size=large excluded (the waste case)", func(t *testing.T) {
 		task := woodpecker.Task{Labels: map[string]string{
@@ -286,7 +371,7 @@ func TestSatisfiableWorkedExamples(t *testing.T) {
 // TestSatisfiableClauses covers the individual filter clauses through the
 // public Satisfiable path (internal-label strip, empty-value skip).
 func TestSatisfiableClauses(t *testing.T) {
-	pool := NewPoolFilter(map[string]string{"type": "linux"})
+	pool := NewPoolFilter(map[string]string{"type": "linux"}, "")
 
 	t.Run("internal woodpecker-ci.org labels are stripped before matching", func(t *testing.T) {
 		task := woodpecker.Task{Labels: map[string]string{
@@ -330,6 +415,45 @@ func TestAgentFilter(t *testing.T) {
 		assert.Equal(t, "7", f.labels[pipeline.LabelFilterOrg])
 		assert.True(t, f.Satisfiable(woodpecker.Task{Labels: map[string]string{"type": "linux", "org-id": "7"}}))
 		assert.False(t, f.Satisfiable(woodpecker.Task{Labels: map[string]string{"type": "linux", "org-id": "8"}}))
+	})
+
+	// The agent's platform is a first-class API field, NOT a custom label
+	// (verified against the live fleet: every agent reports a platform and no
+	// agent carries one in custom_labels). Modeling it from CustomLabels alone
+	// therefore makes a platform-keyed task look unrunnable on a static that
+	// can in fact run it — so the netting step stops crediting its idle slots
+	// and the pool boots paid agents beside an idle machine.
+	t.Run("self-reported platform is modeled, so a platform-keyed task is absorbable", func(t *testing.T) {
+		a := &woodpecker.Agent{
+			OrgID:        -1,
+			Platform:     "linux/arm64",
+			CustomLabels: map[string]string{"builder": "image"},
+		}
+		f := AgentFilter(a)
+		assert.Equal(t, "linux/arm64", f.labels[pipeline.LabelFilterPlatform])
+		task := woodpecker.Task{Labels: map[string]string{"builder": "image", "platform": "linux/arm64", "repo": "rigel/x", "org-id": "1"}}
+		assert.True(t, f.Satisfiable(task), "the idle arm64 builder can run its own platform's work")
+	})
+
+	t.Run("a mismatched platform request is not absorbable", func(t *testing.T) {
+		a := &woodpecker.Agent{
+			OrgID:        -1,
+			Platform:     "linux/arm64",
+			CustomLabels: map[string]string{"builder": "image"},
+		}
+		f := AgentFilter(a)
+		task := woodpecker.Task{Labels: map[string]string{"builder": "image", "platform": "linux/amd64", "repo": "rigel/x", "org-id": "1"}}
+		assert.False(t, f.Satisfiable(task), "an arm64 agent must not absorb amd64 work")
+	})
+
+	t.Run("an explicit custom platform label overrides the self-report", func(t *testing.T) {
+		a := &woodpecker.Agent{
+			OrgID:        -1,
+			Platform:     "linux/arm64",
+			CustomLabels: map[string]string{"platform": "linux/amd64"},
+		}
+		f := AgentFilter(a)
+		assert.Equal(t, "linux/amd64", f.labels[pipeline.LabelFilterPlatform], "customs are copied over the self-reported default")
 	})
 }
 

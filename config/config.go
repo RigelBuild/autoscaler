@@ -19,6 +19,12 @@ type Config struct {
 	AgentIdleTimeout       time.Duration
 	UserData               string // cloudinit template
 	ExtraAgentLabels       map[string]string
+	// PoolPlatform is the Woodpecker `platform` label the pool's agents will
+	// self-report — the fused os/arch string (e.g. "linux/arm64"). A real
+	// agent stamps this itself at registration; the modeled pool filter has no
+	// agent to ask, so it must be configured here or a platform-keyed task
+	// looks unrunnable to the scaler. Empty disables the synthesis.
+	PoolPlatform string
 
 	// BillingModel is taken from the selected provider and selects the teardown
 	// policy the engine applies to idle agents.

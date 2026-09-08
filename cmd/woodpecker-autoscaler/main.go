@@ -88,6 +88,17 @@ func run(ctx context.Context, cmd *cli.Command) error {
 		UserData:          cmd.String("cloudinit-template"),
 		ExtraAgentLabels:  agentLabels,
 		Environment:       agentEnvironment,
+		PoolPlatform:      cmd.String("pool-platform"),
+	}
+
+	// A platform-keyed task is unmatchable against a pool filter carrying no
+	// platform key, and calcAgents skips unsatisfiable tasks silently — so an
+	// unset value strands that work forever with MIN_AGENTS=0 and no error
+	// anywhere. The opt-out is deliberate (it preserves pre-platform
+	// behavior), so warn rather than fail: a deployment that never uses
+	// platform-keyed selectors is still valid.
+	if config.PoolPlatform == "" {
+		log.Warn().Msg("WOODPECKER_POOL_PLATFORM is unset: no platform label is synthesized for the pool, so platform-keyed tasks will never scale it up")
 	}
 
 	provider, err := setupProvider(ctx, cmd, config)
