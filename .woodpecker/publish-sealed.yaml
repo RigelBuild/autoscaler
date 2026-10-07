@@ -20,6 +20,11 @@
 # assumed.) Only sealed release tags (`*-sealed.*`) publish — the publish-tag
 # step is gated on that ref pattern, so a stray or upstream tag never pushes.
 
+# Pin to a Linux docker agent: unlabeled workflows can land on the macOS
+# agents, whose local backend cannot run container images.
+labels:
+  os: linux
+
 when:
   - event: [pull_request, tag]
   - event: push

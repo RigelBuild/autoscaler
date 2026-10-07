@@ -1,3 +1,8 @@
+# Pin to a Linux docker agent: unlabeled workflows can land on the macOS
+# agents, whose local backend cannot run container images.
+labels:
+  os: linux
+
 when:
   event: push
   branch: ${CI_REPO_DEFAULT_BRANCH}
