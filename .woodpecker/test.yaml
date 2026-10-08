@@ -1,3 +1,8 @@
+# Pin to Linux: unlabeled workflows can land on the macOS agents, whose
+# local backend cannot run container images.
+labels:
+  os: linux
+
 when:
   - event: pull_request
 

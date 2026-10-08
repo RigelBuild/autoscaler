@@ -20,6 +20,12 @@
 # assumed.) Only sealed release tags (`*-sealed.*`) publish — the publish-tag
 # step is gated on that ref pattern, so a stray or upstream tag never pushes.
 
+# buildx needs a Docker daemon and privileged mode, so pin to the Linux
+# docker backend (not macOS local, not kubernetes).
+labels:
+  os: linux
+  backend: docker
+
 when:
   - event: [pull_request, tag]
   - event: push
