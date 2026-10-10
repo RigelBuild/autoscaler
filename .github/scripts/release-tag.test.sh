@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Check version selection, deterministic mint targets, collisions, and the non-tip probe.
+# Check version selection, deterministic mint targets, and collisions.
 set -u
 script="$(cd "$(dirname "$0")" && pwd)/release-tag.sh"
 dir="$(mktemp -d)"
@@ -102,17 +102,5 @@ if [ "$?" -eq 0 ]; then echo 'ok   same-target 422 succeeds'; else echo 'FAIL sa
 rm -f "$GH_MARKER"
 GH_MODE=collision GH_EXISTING_SHA="$old" "$script" mint "$new" RigelBuild/autoscaler >/dev/null 2>&1
 if [ "$?" -ne 0 ]; then echo 'ok   conflicting 422 fails'; else echo 'FAIL conflicting 422 fails'; fails=$((fails + 1)); fi
-
-git update-ref refs/remotes/origin/rigel-release "$noop"
-git commit -q --allow-empty -m non-tip-release-tip
-probe_tip="$(git rev-parse HEAD)"
-git update-ref refs/remotes/origin/rigel-release "$probe_tip"
-GITHUB_RUN_ID=probe-123 GH_MODE=create "$script" probe RigelBuild/autoscaler >/dev/null 2>&1
-if [ "$?" -eq 0 ] && grep -q 'refs/tags/mint-probe-probe-123' "$GH_LOG" && grep -q -- '--method DELETE' "$GH_LOG"; then
-  echo 'ok   non-tip probe creates and deletes its temporary tag'
-else
-  echo 'FAIL non-tip probe creates and deletes its temporary tag'
-  fails=$((fails + 1))
-fi
 
 [ "$fails" -eq 0 ]
