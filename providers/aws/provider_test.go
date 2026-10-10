@@ -78,10 +78,13 @@ func TestResolveInstanceTypes(t *testing.T) {
 	}
 }
 
-// describeReturnsAgent makes DescribeInstances report the given agent name in
-// the pool so the deploy path's wait loop resolves on its first poll (no
-// clock-based waiting in the test).
-func describeReturnsAgent(mockClient *mocks.MockEC2Client, agentName string) {
+// testAgentName is the pool agent every deploy case expects back.
+const testAgentName = "pool-1-agent-abc"
+
+// describeReturnsAgent makes DescribeInstances report testAgentName in the pool
+// so the deploy path's wait loop resolves on its first poll (no clock-based
+// waiting in the test).
+func describeReturnsAgent(mockClient *mocks.MockEC2Client) {
 	mockClient.On("DescribeInstances", mock.Anything, mock.Anything).Return(&ec2.DescribeInstancesOutput{
 		Reservations: []ec2_types.Reservation{
 			{
@@ -89,7 +92,7 @@ func describeReturnsAgent(mockClient *mocks.MockEC2Client, agentName string) {
 					{
 						State: &ec2_types.InstanceState{Name: ec2_types.InstanceStateNameRunning},
 						Tags: []ec2_types.Tag{
-							{Key: aws.String("Name"), Value: aws.String(agentName)},
+							{Key: aws.String("Name"), Value: aws.String(testAgentName)},
 						},
 					},
 				},
@@ -99,7 +102,7 @@ func describeReturnsAgent(mockClient *mocks.MockEC2Client, agentName string) {
 }
 
 func TestDeployAgent(t *testing.T) {
-	const agentName = "pool-1-agent-abc"
+	const agentName = testAgentName
 
 	tests := []struct {
 		name             string
@@ -122,7 +125,7 @@ func TestDeployAgent(t *testing.T) {
 				})).Return(&ec2.RunInstancesOutput{
 					Instances: []ec2_types.Instance{{InstanceId: aws.String("i-1")}},
 				}, nil).Once()
-				describeReturnsAgent(mockClient, agentName)
+				describeReturnsAgent(mockClient)
 				// CreateFleet must never be called on this path; leaving it
 				// unregistered means the mock fails the test if it is.
 			},
@@ -182,7 +185,7 @@ func TestDeployAgent(t *testing.T) {
 				})).Return(&ec2.CreateFleetOutput{
 					Instances: []ec2_types.CreateFleetInstance{{InstanceIds: []string{"i-9"}}},
 				}, nil).Once()
-				describeReturnsAgent(mockClient, agentName)
+				describeReturnsAgent(mockClient)
 			},
 		},
 		{
@@ -199,7 +202,7 @@ func TestDeployAgent(t *testing.T) {
 				})).Return(&ec2.CreateFleetOutput{
 					Instances: []ec2_types.CreateFleetInstance{{InstanceIds: []string{"i-9"}}},
 				}, nil).Once()
-				describeReturnsAgent(mockClient, agentName)
+				describeReturnsAgent(mockClient)
 			},
 		},
 		{
@@ -219,7 +222,7 @@ func TestDeployAgent(t *testing.T) {
 				})).Return(&ec2.CreateFleetOutput{
 					Instances: []ec2_types.CreateFleetInstance{{InstanceIds: []string{"i-9"}}},
 				}, nil).Once()
-				describeReturnsAgent(mockClient, agentName)
+				describeReturnsAgent(mockClient)
 			},
 		},
 		{
@@ -236,7 +239,7 @@ func TestDeployAgent(t *testing.T) {
 						ErrorMessage: aws.String("no capacity for t4g.medium"),
 					}},
 				}, nil).Once()
-				describeReturnsAgent(mockClient, agentName)
+				describeReturnsAgent(mockClient)
 			},
 		},
 		{

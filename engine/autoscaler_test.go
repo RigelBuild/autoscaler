@@ -46,6 +46,12 @@ func macTask() woodpecker.Task {
 	return woodpecker.Task{Labels: map[string]string{"type": "macos", "repo": "rigel/x", "org-id": "1"}}
 }
 
+// platformTask is a pending task keyed on the agent-self-reported platform
+// label, as the taxonomy's pool selectors emit.
+func platformTask() woodpecker.Task {
+	return woodpecker.Task{Labels: map[string]string{"type": "linux", "platform": "linux/arm64", "repo": "rigel/x", "org-id": "1"}}
+}
+
 // elasticLabels is the pool's WOODPECKER_AGENT_LABELS in the parent's model.
 func elasticLabels() map[string]string {
 	return map[string]string{"type": "linux", "pool": "elastic"}
@@ -106,6 +112,85 @@ func Test_calcAgents(t *testing.T) {
 
 		value, _ := autoscaler.calcAgents(t.Context())
 		assert.Equal(t, float64(2), value, "only the two bare-linux tasks are eligible")
+	})
+
+	// Regression guard for the strand-forever case: with MIN_AGENTS=0 a cold
+	// pool only ever scales from eligible pending work, so a platform-keyed
+	// task the model cannot satisfy strands with no error and no scale-up.
+	t.Run("platform-keyed pending ⇒ scales when PoolPlatform matches", func(t *testing.T) {
+		autoscaler := Autoscaler{client: &MockClient{
+			pending: []woodpecker.Task{platformTask(), platformTask()},
+		}, config: &config.Config{
+			WorkflowsPerAgent: 1,
+			MaxAgents:         8,
+			MinAgents:         0,
+			ExtraAgentLabels:  elasticLabels(),
+			PoolPlatform:      "linux/arm64",
+		}}
+
+		value, err := autoscaler.calcAgents(t.Context())
+		assert.NoError(t, err)
+		assert.Equal(t, float64(2), value, "a platform the pool's agents will report must count as eligible demand")
+	})
+
+	t.Run("platform-keyed pending ⇒ no scale-up when PoolPlatform is unset", func(t *testing.T) {
+		autoscaler := Autoscaler{client: &MockClient{
+			pending: []woodpecker.Task{platformTask(), platformTask()},
+		}, config: &config.Config{
+			WorkflowsPerAgent: 1,
+			MaxAgents:         8,
+			MinAgents:         0,
+			ExtraAgentLabels:  elasticLabels(),
+		}}
+
+		value, _ := autoscaler.calcAgents(t.Context())
+		assert.Equal(t, float64(0), value, "with no configured platform the model cannot claim the task")
+	})
+
+	t.Run("platform-keyed pending ⇒ no scale-up when PoolPlatform mismatches", func(t *testing.T) {
+		autoscaler := Autoscaler{client: &MockClient{
+			pending: []woodpecker.Task{platformTask(), platformTask()},
+		}, config: &config.Config{
+			WorkflowsPerAgent: 1,
+			MaxAgents:         8,
+			MinAgents:         0,
+			ExtraAgentLabels:  elasticLabels(),
+			PoolPlatform:      "linux/amd64",
+		}}
+
+		value, _ := autoscaler.calcAgents(t.Context())
+		assert.Equal(t, float64(0), value, "an amd64 pool must not scale for arm64 work")
+	})
+
+	// The money case for modeling the agent's self-reported platform: an idle
+	// arm64 static builder with free slots must NET OUT platform-keyed work
+	// rather than have the pool boot Spot agents beside it. Before AgentFilter
+	// read Agent.Platform this returned 2 — two paid boots next to an idle
+	// machine that could run both tasks.
+	t.Run("an idle static nets out platform-keyed work via its self-reported platform", func(t *testing.T) {
+		builder := &woodpecker.Agent{
+			ID: 7, Name: "mattmini", OrgID: -1, Capacity: 2,
+			Platform:     "linux/arm64",
+			CustomLabels: map[string]string{"builder": "image"},
+			LastContact:  time.Now().Unix(),
+		}
+		buildTask := woodpecker.Task{Labels: map[string]string{"builder": "image", "platform": "linux/arm64", "repo": "rigel/x", "org-id": "1"}}
+		autoscaler := Autoscaler{
+			client:    &MockClient{pending: []woodpecker.Task{buildTask, buildTask}},
+			allAgents: []*woodpecker.Agent{builder},
+			config: &config.Config{
+				WorkflowsPerAgent:      1,
+				MaxAgents:              8,
+				PoolID:                 "1",
+				ExtraAgentLabels:       map[string]string{"builder": "image"},
+				PoolPlatform:           "linux/arm64",
+				AgentInactivityTimeout: 10 * time.Minute,
+			},
+		}
+
+		value, err := autoscaler.calcAgents(t.Context())
+		assert.NoError(t, err)
+		assert.Equal(t, float64(0), value, "two free slots on the idle arm64 builder absorb both arm64 builds")
 	})
 
 	t.Run("WorkflowsPerAgent packs multiple eligible tasks per agent", func(t *testing.T) {

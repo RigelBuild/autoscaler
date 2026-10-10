@@ -39,6 +39,9 @@ import (
 // never needs, and this is a single stable sentinel.
 const idNotSet int64 = -1
 
+// synthesizedLabels counts the defaults each filter may add: repo, platform, org-id.
+const synthesizedLabels = 3
+
 // transliteratedFromVersion is the exact go.woodpecker-ci.org/woodpecker/v3
 // module version whose server/scheduler/filter.go the match logic below was
 // transliterated from. The parity is a manual invariant: matchFilter /
@@ -59,13 +62,20 @@ type Filter struct {
 }
 
 // NewPoolFilter builds the modeled filter for the elastic pool this autoscaler
-// manages, from the pool's WOODPECKER_AGENT_LABELS (config.ExtraAgentLabels).
+// manages, from the pool's WOODPECKER_AGENT_LABELS (config.ExtraAgentLabels)
+// and the platform its agents will self-report (config.PoolPlatform).
 //
 // It synthesizes the same defaults the real agents get so server-stamped task
 // labels don't make every task unmatchable:
 //   - repo="*"   — the agent default (cmd/agent/core/agent.go: LabelFilterRepo
 //     = "*" "allow all repos by default"), overridable by an explicit custom
 //     label;
+//   - platform=<platform> — a real agent reports its own fused os/arch
+//     (cmd/agent/core/agent.go stamps LabelFilterPlatform before the custom
+//     labels), but the model has no agent to ask, so the value must be
+//     configured. Overridable by an explicit custom label. When platform is
+//     "" no platform key is synthesized at all: an unconfigured deployment
+//     keeps today's behavior rather than asserting a platform it cannot know;
 //   - org-id="*" — autoscaler-created agents are system agents (OrgID unset),
 //     and the server enforces org-id="*" for them
 //     (server/model/agent.go GetServerLabels).
@@ -73,9 +83,12 @@ type Filter struct {
 // A custom label of the same key overrides the default (agent.go applies
 // customLabels last via maps.Copy); org-id is server-enforced, so it is applied
 // after the customs and always wins for the pool's system agents.
-func NewPoolFilter(extra map[string]string) Filter {
-	labels := make(map[string]string, len(extra)+2)
+func NewPoolFilter(extra map[string]string, platform string) Filter {
+	labels := make(map[string]string, len(extra)+synthesizedLabels)
 	labels[pipeline.LabelFilterRepo] = "*"
+	if platform != "" {
+		labels[pipeline.LabelFilterPlatform] = platform
+	}
 	maps.Copy(labels, extra)
 	// org-id is enforced by the server for system (autoscaler-created) agents,
 	// so it is applied last and is not overridable by ExtraAgentLabels.
@@ -87,11 +100,19 @@ func NewPoolFilter(extra map[string]string) Filter {
 // shared-demand netting step to test whether a non-pool/static agent can
 // absorb a task). It mirrors the agent + server label synthesis:
 //   - repo="*" default under the agent's CustomLabels;
+//   - platform from the agent's own self-report. Unlike the pool's value this
+//     needs no config: the agent already told the server its fused os/arch and
+//     the API carries it as a first-class field, so it is truthful by
+//     construction. It sits under CustomLabels for the same reason the real
+//     agent's does (agent.go stamps it, then copies customs over the top);
 //   - org-id from the server ownership rule (server/model/agent.go
 //     GetServerLabels): OrgID unset (== idNotSet, -1) ⇒ "*", else the id.
 func AgentFilter(a *woodpecker.Agent) Filter {
-	labels := make(map[string]string, len(a.CustomLabels)+2)
+	labels := make(map[string]string, len(a.CustomLabels)+synthesizedLabels)
 	labels[pipeline.LabelFilterRepo] = "*"
+	if a.Platform != "" {
+		labels[pipeline.LabelFilterPlatform] = a.Platform
+	}
 	maps.Copy(labels, a.CustomLabels)
 	if a.OrgID != idNotSet {
 		labels[pipeline.LabelFilterOrg] = strconv.FormatInt(a.OrgID, 10)

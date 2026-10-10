@@ -118,4 +118,9 @@ var flags = []cli.Flag{
 		Usage:   "add additional labels the agent will report to the server. list with key=value pairs",
 		Sources: cli.EnvVars("WOODPECKER_AGENT_LABELS"),
 	},
+	&cli.StringFlag{
+		Name:    "pool-platform",
+		Usage:   "platform the pool's agents self-report, as os/arch (e.g. linux/arm64). must match what the agents will report; leave empty to disable platform synthesis in the pool filter",
+		Sources: cli.EnvVars("WOODPECKER_POOL_PLATFORM"),
+	},
 }

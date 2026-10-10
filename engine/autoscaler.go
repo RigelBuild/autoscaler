@@ -521,7 +521,7 @@ func (a *Autoscaler) calcAgents(ctx context.Context) (float64, error) {
 		return 0, err
 	}
 
-	poolFilter := labelfilter.NewPoolFilter(a.config.ExtraAgentLabels)
+	poolFilter := labelfilter.NewPoolFilter(a.config.ExtraAgentLabels, a.config.PoolPlatform)
 	staticSlots := a.nonPoolFreeSlots(queueInfo.Running)
 
 	eligiblePending := 0
