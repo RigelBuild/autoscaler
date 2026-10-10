@@ -34,6 +34,9 @@ steps:
   - name: lint
     image: *golang_image
     depends_on: [vendor]
+    # The client-go type-check tree OOMs a 4 GiB pool agent at full compile parallelism.
+    environment:
+      GOFLAGS: -p=2
     commands:
       - make lint
     when: *when
