@@ -47,7 +47,8 @@ No Woodpecker **server** change is needed — the per-task labels are already in
 ## Build & publish
 
 `.github/workflows/publish-image.yml` publishes the multi-arch
-`ghcr.io/rigelbuild/autoscaler:<version>` image on a `v*.*.*-rigel.*` tag.
+`ghcr.io/rigelbuild/autoscaler:<version>` image on a `v*.*.*-rigel.*` tag,
+or by manual `workflow_dispatch` with an explicit version.
 No `:latest` is deployed. The elastic-runner pool's IaC pins that image by
 digest. Only the scaler process changes; the pool's VPC/IAM, cloud-init,
 labels and admin token stay the same.
