@@ -18,6 +18,7 @@ import (
 	"go.woodpecker-ci.org/autoscaler/providers/aws"
 	"go.woodpecker-ci.org/autoscaler/providers/equinixmetal"
 	"go.woodpecker-ci.org/autoscaler/providers/hetznercloud"
+	"go.woodpecker-ci.org/autoscaler/providers/kubernetes"
 	"go.woodpecker-ci.org/autoscaler/providers/linode"
 	"go.woodpecker-ci.org/autoscaler/providers/scaleway"
 	"go.woodpecker-ci.org/autoscaler/providers/vultr"
@@ -39,6 +40,8 @@ func setupProvider(ctx context.Context, cmd *cli.Command, config *config.Config)
 		return vultr.New(ctx, cmd, config)
 	case "scaleway":
 		return scaleway.New(ctx, cmd, config)
+	case "kubernetes":
+		return kubernetes.New(ctx, cmd, config)
 	case "":
 		return nil, fmt.Errorf("please select a provider")
 	}
@@ -183,6 +186,7 @@ func main() {
 	app.Flags = append(app.Flags, linode.ProviderFlags...)
 	app.Flags = append(app.Flags, aws.ProviderFlags...)
 	app.Flags = append(app.Flags, vultr.ProviderFlags...)
+	app.Flags = append(app.Flags, kubernetes.ProviderFlags...)
 
 	if err := app.Run(context.Background(), os.Args); err != nil {
 		log.Error().Err(err).Msg("got error while try to run autoscaler")
