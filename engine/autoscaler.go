@@ -18,12 +18,6 @@ import (
 	"go.woodpecker-ci.org/woodpecker/v3/woodpecker-go/woodpecker"
 )
 
-// agentListPageSize is the server's maxPageSize for /api/agents
-// (server/router/middleware/session/pagination.go). woodpecker-go's AgentList()
-// fetches only the first page; loadAgents warns if the fleet reaches this size,
-// since the netting step would then under-count non-pool capacity.
-const agentListPageSize = 50
-
 type Autoscaler struct {
 	client server.Client
 	// agents holds only this pool's agents (name matches the PoolID regex),
@@ -100,17 +94,6 @@ func (a *Autoscaler) loadAgents(_ context.Context) error {
 		return fmt.Errorf("client.AgentListWithOpts: %w", err)
 	}
 
-	// The server paginates /api/agents at maxPageSize=50 and the woodpecker-go
-	// AgentList() fetches only the first page. The shared-demand netting in
-	// calcAgents needs to see free capacity on non-pool agents, so a truncated
-	// list would under-count static capacity and over-provision the pool
-	// (bounded by MaxAgents, so it errs to burst-relief, never to starvation).
-	// The real fleet is a handful of agents; warn loudly if it ever approaches
-	// the page limit so this is caught before it silently degrades.
-	if len(agents) >= agentListPageSize {
-		log.Warn().Int("agents", len(agents)).Int("page_size", agentListPageSize).
-			Msg("agent list hit the server page size; shared-demand netting may under-count non-pool capacity and over-provision (bounded by MaxAgents)")
-	}
 	a.allAgents = agents
 
 	r, err := regexp.Compile(fmt.Sprintf("pool-%s-agent-.*?", a.config.PoolID))

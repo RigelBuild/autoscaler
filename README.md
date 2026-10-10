@@ -37,29 +37,21 @@ The agents will use `WOODPECKER_GRPC_ADDR` and an agent token automatically crea
 
 ## AWS
 
-Set `WOODPECKER_PROVIDER=aws` and configure at least:
-
-- `WOODPECKER_AWS_REGION`
-- `WOODPECKER_AWS_SUBNETS`
-- `WOODPECKER_AWS_AMI_ID`
-- `WOODPECKER_AWS_INSTANCE_TYPES` (or the legacy singular `WOODPECKER_AWS_INSTANCE_TYPE`)
+Set `WOODPECKER_PROVIDER=aws`. Upstream's defaults resolve the AMI, subnets and
+region where they are not set.
 
 Instance-type selection:
 
-- `WOODPECKER_AWS_INSTANCE_TYPE` — a single EC2 instance type. Agents launch via
-  `RunInstances`, one instance per deploy. This is the default, single-type
-  behaviour.
-- `WOODPECKER_AWS_INSTANCE_TYPES` — a comma-separated list of EC2 instance
-  types, in preference order. When set it takes precedence over the singular
-  flag. More than one type requires `WOODPECKER_AWS_LAUNCH_TEMPLATE_ID`.
+- `WOODPECKER_AWS_INSTANCE_TYPES` (or the legacy singular
+  `WOODPECKER_AWS_INSTANCE_TYPE`) — a comma-separated list of EC2 instance
+  types, optionally `type:region`. When both are set, the plural wins. Without a
+  launch template, each deploy tries the types in order with `RunInstances` and
+  falls back on capacity errors.
 - `WOODPECKER_AWS_LAUNCH_TEMPLATE_ID` — the id of an EC2 launch template used
-  as the anchor for the `CreateFleet` (type `instant`) deploy path. Setting it
-  routes deploys through `CreateFleet` with a `price-capacity-optimized` Spot
-  allocation across the configured instance types × subnets, letting AWS place
-  each agent in the deepest, cheapest capacity pool. Security groups are sourced
-  from the launch template on this path. This diversified deployment is the
-  roadmap item "Support agent deployment with specific attributes (e.g.
-  platforms, architectures, etc.)".
+  as the anchor for one `CreateFleet` (type `instant`) call per deploy, across
+  every configured type × subnet. With Spot enabled it uses a
+  `price-capacity-optimized` allocation. Security groups come from the launch
+  template on this path. All types must resolve to a single region.
 
 ## DigitalOcean
 

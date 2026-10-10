@@ -2,6 +2,7 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 
@@ -298,6 +299,24 @@ func TestDeployAgentFleet(t *testing.T) {
 			},
 			expectedError: "InsufficientInstanceCapacity: no Spot capacity available",
 		},
+		{
+			name:             "APIErrorIsWrapped",
+			launchTemplateID: "lt-abc",
+			setupMocks: func(client *mocks.MockClient) {
+				client.On("CreateFleet", mock.Anything, mock.Anything, mock.Anything).
+					Return(nil, errors.New("UnauthorizedOperation")).Once()
+			},
+			expectedError: "CreateFleet: UnauthorizedOperation",
+		},
+		{
+			name:             "EmptyResultWithoutErrorsFails",
+			launchTemplateID: "lt-abc",
+			setupMocks: func(client *mocks.MockClient) {
+				client.On("CreateFleet", mock.Anything, mock.Anything, mock.Anything).
+					Return(&ec2.CreateFleetOutput{}, nil).Once()
+			},
+			expectedError: "CreateFleet: no instances launched",
+		},
 	}
 
 	for _, tt := range tests {
@@ -345,6 +364,8 @@ func TestValidateLaunchTemplate(t *testing.T) {
 }
 
 func TestInstanceTypesEnvPopulatesInstanceTypeFlag(t *testing.T) {
+	// The diversified plural list must win over a leftover legacy singular.
+	t.Setenv("WOODPECKER_AWS_INSTANCE_TYPE", "t3.micro")
 	t.Setenv("WOODPECKER_AWS_INSTANCE_TYPES", "t4g.medium,c6g.large")
 
 	cmd := &cli.Command{
