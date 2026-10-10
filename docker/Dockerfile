@@ -2,7 +2,7 @@ FROM --platform=$BUILDPLATFORM golang:1.26 AS build
 
 WORKDIR /src
 COPY . .
-ARG TARGETOS TARGETARCH
+ARG TARGETOS TARGETARCH CI_COMMIT_SHA CI_COMMIT_TAG CI_COMMIT_BRANCH
 # One compile at a time: the ec2 + client-go compiles OOM a 4 GiB pool agent in parallel.
 ENV GOFLAGS=-p=1
 RUN --mount=type=cache,target=/root/.cache/go-build \
