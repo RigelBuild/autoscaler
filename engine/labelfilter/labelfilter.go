@@ -39,6 +39,9 @@ import (
 // never needs, and this is a single stable sentinel.
 const idNotSet int64 = -1
 
+// synthesizedLabels counts the defaults each filter may add: repo, platform, org-id.
+const synthesizedLabels = 3
+
 // transliteratedFromVersion is the exact go.woodpecker-ci.org/woodpecker/v3
 // module version whose server/scheduler/filter.go the match logic below was
 // transliterated from. The parity is a manual invariant: matchFilter /
@@ -81,7 +84,7 @@ type Filter struct {
 // customLabels last via maps.Copy); org-id is server-enforced, so it is applied
 // after the customs and always wins for the pool's system agents.
 func NewPoolFilter(extra map[string]string, platform string) Filter {
-	labels := make(map[string]string, len(extra)+3)
+	labels := make(map[string]string, len(extra)+synthesizedLabels)
 	labels[pipeline.LabelFilterRepo] = "*"
 	if platform != "" {
 		labels[pipeline.LabelFilterPlatform] = platform
@@ -105,7 +108,7 @@ func NewPoolFilter(extra map[string]string, platform string) Filter {
 //   - org-id from the server ownership rule (server/model/agent.go
 //     GetServerLabels): OrgID unset (== idNotSet, -1) ⇒ "*", else the id.
 func AgentFilter(a *woodpecker.Agent) Filter {
-	labels := make(map[string]string, len(a.CustomLabels)+3)
+	labels := make(map[string]string, len(a.CustomLabels)+synthesizedLabels)
 	labels[pipeline.LabelFilterRepo] = "*"
 	if a.Platform != "" {
 		labels[pipeline.LabelFilterPlatform] = a.Platform
