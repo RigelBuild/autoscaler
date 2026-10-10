@@ -46,10 +46,9 @@ No Woodpecker **server** change is needed — the per-task labels are already in
 
 ## Build & publish
 
-The fork enrolls on `ci.sealedsecurity.com` and publishes
-`ghcr.io/sealedsecurity/autoscaler:<tag>` from its own pipeline
-(`.woodpecker/`), mirroring the server-fork build pattern. Tags are pinned
-(`<upstream-base>-sealed.<n>`); no `:latest` is deployed. The image is consumed
-by the elastic-runner pool's IaC (SEA-1122 parent) by pinning that tag —
-swapping in behind the same pool (same VPC/IAM, cloud-init, labels, admin token),
-replacing only the scaler process.
+`.github/workflows/publish-image.yml` publishes the multi-arch
+`ghcr.io/rigelbuild/autoscaler:<version>` image on a `v*.*.*-rigel.*` tag,
+or by manual `workflow_dispatch` with an explicit version.
+No `:latest` is deployed. The elastic-runner pool's IaC pins that image by
+digest. Only the scaler process changes; the pool's VPC/IAM, cloud-init,
+labels and admin token stay the same.

@@ -56,3 +56,6 @@ steps:
         from_secret: docker_password
     when:
       event: tag
+      # Rigel tags publish to GHCR from .github/workflows/publish-image.yml.
+      ref:
+        exclude: refs/tags/v*-rigel.*
