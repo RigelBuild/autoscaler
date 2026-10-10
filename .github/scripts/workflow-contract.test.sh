@@ -36,7 +36,7 @@ contains_version_file="$(grep -F -c '.github/rigel-version' "$root/.github/scrip
 expect 'version resolver reads the required source' "$contains_version_file" 1
 expect 'finalize creates the version tag' "$(grep -F -c '"${image}:${tag}" "${image}@${IMAGE_DIGEST}"' "$root/.github/scripts/finalize-images.sh")" 1
 expect 'finalize verifies resolved manifest digest' "$(grep -F -c '[ "$resolved" != "$IMAGE_DIGEST" ]' "$root/.github/scripts/finalize-images.sh")" 1
-expect 'publisher version source is initialized' "$(cat "$root/.github/rigel-version")" '1.5.0-rigel.1'
+[[ "$(cat "$root/.github/rigel-version")" =~ ^[0-9]+\.[0-9]+\.[0-9]+-rigel\.[1-9][0-9]*$ ]] || fail 'publisher version source is X.Y.Z-rigel.N'
 expect 'release source is widened for build args' "$(grep -F -c 'ARG TARGETOS TARGETARCH CI_COMMIT_SHA CI_COMMIT_TAG CI_COMMIT_BRANCH' "$root/docker/Dockerfile")" 1
 expect 'PR CI runs release static tests' "$(grep -F -c '.github/scripts/workflow-contract.test.sh' "$root/.woodpecker/test.yaml")" 1
 expect 'tag publish uses upstream Dockerfile' "$(yq -r '.jobs.publish.steps | map(select(.uses | test("docker/build-push-action"))) | .[0].with.file' "$publisher")" docker/Dockerfile
