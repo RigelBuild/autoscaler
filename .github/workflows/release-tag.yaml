@@ -1,0 +1,76 @@
+name: release-tag
+
+'on':
+  pull_request:
+    branches: [rigel-release]
+  push:
+    branches: [rigel-release]
+  workflow_dispatch:
+    inputs:
+      probe:
+        description: Run the one-time non-tip tag probe before the first release
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Validate a changed release version
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: .github/scripts/release-tag.sh check-pr "$BASE_SHA" "$HEAD_SHA"
+
+  mint:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: rigel-release
+    steps:
+      - name: Require release-branch dispatch
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/rigel-release'
+        run: |
+          echo '::error::workflow_dispatch is only allowed from rigel-release' >&2
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Create scoped release App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.AUTOMATION_APP_CLIENT_ID }}
+          private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
+          permission-contents: write
+          repositories: autoscaler
+
+      - name: Run non-tip tag probe
+        if: github.event_name == 'workflow_dispatch' && inputs.probe
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: .github/scripts/release-tag.sh probe "$GITHUB_REPOSITORY"
+
+      - name: Mint release tag if needed
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: .github/scripts/release-tag.sh mint "$RELEASE_SHA" "$RELEASE_REPOSITORY"

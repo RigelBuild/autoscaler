@@ -28,6 +28,22 @@ variables:
       event: [pull_request, tag, deployment]
 
 steps:
+  - name: test-release-workflows
+    image: docker.io/bash:5
+    commands:
+      - apk add --no-cache git yq-go
+      - .github/scripts/resolve-image-version.test.sh
+      - .github/scripts/check-release-source.test.sh
+      - .github/scripts/release-tag.test.sh
+      - .github/scripts/finalize-images.test.sh
+      - .github/scripts/workflow-contract.test.sh
+    when:
+      - event: pull_request
+        path:
+          - '.github/scripts/**'
+          - '.github/workflows/**'
+          - '.github/rigel-version'
+          - '.woodpecker/test.yaml'
   - name: vendor
     image: *golang_image
     commands:
