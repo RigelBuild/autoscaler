@@ -50,7 +50,7 @@ const synthesizedLabels = 3
 // TestParityVersionPin tripwire fails when the pinned module version drifts
 // from this const, forcing a re-read of the upstream filter (and a bump of
 // this const) on every dependency update — see labelfilter_test.go.
-const transliteratedFromVersion = "v3.16.0"
+const transliteratedFromVersion = "v3.18.2-0.20261004092618-0002083b83d8"
 
 // Filter is the effective label set an agent advertises to the scheduler: its
 // configured/custom labels plus the server/agent-stamped defaults (repo="*",

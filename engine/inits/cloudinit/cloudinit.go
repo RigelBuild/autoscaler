@@ -61,7 +61,10 @@ func RenderUserDataTemplate(config *config.Config, agent *woodpecker.Agent, r Re
 		return "", err
 	}
 
-	return userData.String(), nil
+	// cloud-init only recognizes user data if the header (e.g. #cloud-config)
+	// is on the very first line. Some datasources tolerate leading whitespace,
+	// stricter ones such as NoCloud silently ignore the whole payload.
+	return strings.TrimSpace(userData.String()), nil
 }
 
 // GenExtraAgentLabels formats additional labels for the Woodpecker agent.
@@ -74,8 +77,7 @@ func GenExtraAgentLabels(conf map[string]string) string {
 }
 
 // editorconfig-checker-disable
-var CloudInitUserDataUbuntuDefault = `
-#cloud-config
+var CloudInitUserDataUbuntuDefault = `#cloud-config
 
 package_reboot_if_required: false
 package_update: true

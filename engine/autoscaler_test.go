@@ -1,12 +1,14 @@
 package engine
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"go.woodpecker-ci.org/autoscaler/config"
 	"go.woodpecker-ci.org/autoscaler/engine/types"
@@ -568,6 +570,36 @@ func Test_calcAgents(t *testing.T) {
 		value, _ := autoscaler.calcAgents(t.Context())
 		assert.Equal(t, float64(1), value, "greedy first-fit: linux(org1) takes the broad slot, org2 can't use the org1-scoped narrow slot ⇒ over-provisions by 1 (accepted safe-direction approx; see calcAgents netting comment)")
 	})
+
+	t.Run("should create new agents when pool is fully busy with a backlog", func(t *testing.T) {
+		// All 3 pool agents are busy and 2 more workflows are queued; the pool
+		// must grow by 2, not shrink (upstream's double-subtract regression).
+		busy := func(id int64) woodpecker.Task {
+			return woodpecker.Task{AgentID: id, Labels: map[string]string{"type": "linux"}}
+		}
+		pool := []*woodpecker.Agent{
+			{ID: 1, Name: "pool-1-agent-1111"},
+			{ID: 2, Name: "pool-1-agent-2222"},
+			{ID: 3, Name: "pool-1-agent-3333"},
+		}
+		autoscaler := Autoscaler{
+			client: &MockClient{
+				running: []woodpecker.Task{busy(1), busy(2), busy(3)},
+				pending: []woodpecker.Task{linuxTask(), linuxTask()},
+			},
+			agents:    pool,
+			allAgents: pool,
+			config: &config.Config{
+				WorkflowsPerAgent: 1,
+				MaxAgents:         10,
+				PoolID:            "1",
+				ExtraAgentLabels:  elasticLabels(),
+			},
+		}
+
+		value, _ := autoscaler.calcAgents(t.Context())
+		assert.Equal(t, float64(2), value)
+	})
 }
 
 func Test_getQueueInfo(t *testing.T) {
@@ -585,6 +617,38 @@ func Test_getQueueInfo(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Len(t, info.Pending, 2)
 		assert.Len(t, info.Running, 1)
+	})
+}
+
+func Test_loadAgents(t *testing.T) {
+	t.Run("should load every page of the agent list", func(t *testing.T) {
+		ctx := t.Context()
+		client := mocks_server.NewMockClient(t)
+		autoscaler := Autoscaler{
+			config: &config.Config{PoolID: "1"},
+			client: client,
+		}
+
+		// The server caps a page at 50 agents, so the agents deployed most
+		// recently only show up on the second page.
+		firstPage := make([]*woodpecker.Agent, 0, 50)
+		for i := 1; i <= 50; i++ {
+			firstPage = append(firstPage, &woodpecker.Agent{ID: int64(i), Name: fmt.Sprintf("pool-1-agent-%d", i)})
+		}
+		secondPage := []*woodpecker.Agent{
+			{ID: 51, Name: "pool-1-agent-51"},
+			{ID: 52, Name: "pool-2-agent-52"},
+		}
+
+		client.On("AgentListWithOpts", woodpecker.AgentListOptions{ListOptions: woodpecker.ListOptions{Page: 1}}).Return(firstPage, nil)
+		client.On("AgentListWithOpts", woodpecker.AgentListOptions{ListOptions: woodpecker.ListOptions{Page: 2}}).Return(secondPage, nil)
+
+		err := autoscaler.loadAgents(ctx)
+		assert.NoError(t, err)
+		// 50 from the first page plus the one agent of this pool on the second,
+		// the agent of the other pool filtered out.
+		require.Len(t, autoscaler.agents, 51)
+		assert.Equal(t, "pool-1-agent-51", autoscaler.agents[50].Name)
 	})
 }
 
