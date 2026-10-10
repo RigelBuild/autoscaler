@@ -6,12 +6,6 @@ name: release-tag
   push:
     branches: [rigel-release]
   workflow_dispatch:
-    inputs:
-      probe:
-        description: Run the one-time non-tip tag probe before the first release
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -59,13 +53,6 @@ jobs:
           private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
           permission-contents: write
           repositories: autoscaler
-
-      - name: Run non-tip tag probe
-        if: github.event_name == 'workflow_dispatch' && inputs.probe
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
-        run: .github/scripts/release-tag.sh probe "$GITHUB_REPOSITORY"
 
       - name: Mint release tag if needed
         if: github.event_name == 'push'

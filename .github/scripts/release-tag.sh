@@ -6,7 +6,7 @@ readonly VERSION_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rigel\.(
 export LC_ALL=C
 
 usage() {
-  echo 'Usage: release-tag.sh check-pr <base-sha> <head-sha> | mint <sha> <owner/repo> | probe <owner/repo>' >&2
+  echo 'Usage: release-tag.sh check-pr <base-sha> <head-sha> | mint <sha> <owner/repo>' >&2
   exit 2
 }
 
@@ -127,15 +127,6 @@ mint() {
   return "$rc"
 }
 
-probe() {
-  local repo="$1" run_id="${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}" target tag
-  target="$(git rev-parse --verify origin/rigel-release~1)"
-  tag="mint-probe-${run_id}"
-  gh api --method POST "repos/${repo}/git/refs" -f "ref=refs/tags/${tag}" -f "sha=${target}"
-  gh api --method DELETE "repos/${repo}/git/refs/tags/${tag}"
-  echo "Created and deleted ${tag} at ${target}"
-}
-
 [ "$#" -ge 1 ] || usage
 command="$1"
 shift
@@ -147,10 +138,6 @@ case "$command" in
   mint)
     [ "$#" -eq 2 ] || usage
     mint "$1" "$2"
-    ;;
-  probe)
-    [ "$#" -eq 1 ] || usage
-    probe "$1"
     ;;
   *) usage ;;
 esac

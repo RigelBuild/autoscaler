@@ -78,7 +78,7 @@ expect 'mint uses the E1 client ID' "$(yq -r '.jobs.mint.steps | map(select(.use
 expect 'mint uses the E1 private key' "$(yq -r '.jobs.mint.steps | map(select(.uses | test("actions/create-github-app-token"))) | .[0].with.private-key' "$release")" '${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}'
 expect 'mint token has contents write' "$(yq -r '.jobs.mint.steps | map(select(.uses | test("actions/create-github-app-token"))) | .[0].with.permission-contents' "$release")" write
 expect 'mint token is repository scoped' "$(yq -r '.jobs.mint.steps | map(select(.uses | test("actions/create-github-app-token"))) | .[0].with.repositories' "$release")" autoscaler
-expect 'probe input exists' "$(yq -r '.on.workflow_dispatch.inputs.probe.type' "$release")" boolean
+expect 'dispatch takes no inputs' "$(yq -r '.on.workflow_dispatch.inputs // "none"' "$release")" none
 expect 'mint has no concurrency' "$(yq -r '.jobs.mint.concurrency // "none"' "$release")" none
 while IFS= read -r line; do
   [[ "$line" =~ uses:[[:space:]]+[^[:space:]#]+@[0-9a-f]{40}[[:space:]]+#\ v[^[:space:]]+[[:space:]]*$ ]] || fail "third-party action is not SHA-pinned with a version trailer: $line"
