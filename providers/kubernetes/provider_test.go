@@ -18,7 +18,6 @@ import (
 
 	"go.woodpecker-ci.org/autoscaler/config"
 	"go.woodpecker-ci.org/autoscaler/engine"
-	"go.woodpecker-ci.org/autoscaler/engine/inits/cloudinit"
 	"go.woodpecker-ci.org/woodpecker/v3/woodpecker-go/woodpecker"
 )
 
@@ -70,7 +69,7 @@ func TestDeployAgent(t *testing.T) {
 			require.Len(t, pod.Spec.Containers, 1)
 			container := pod.Spec.Containers[0]
 			assert.Equal(t, tt.wantImage, container.Image)
-			assert.Equal(t, cloudinit.GenExtraAgentLabels(cfg.ExtraAgentLabels), envValue(container.Env, "WOODPECKER_AGENT_LABELS"))
+			assert.Equal(t, "team=ci", envValue(container.Env, "WOODPECKER_AGENT_LABELS"))
 			assert.Equal(t, "kept", envValue(container.Env, "TEMPLATE_ENV"))
 			assert.Equal(t, cfg.GRPCAddress, envValue(container.Env, "WOODPECKER_SERVER"))
 			assert.Equal(t, "3", envValue(container.Env, "WOODPECKER_MAX_WORKFLOWS"))
@@ -109,6 +108,27 @@ func TestDeployAgent(t *testing.T) {
 			require.NotNil(t, secret.OwnerReferences[0].Controller)
 			assert.False(t, *secret.OwnerReferences[0].Controller)
 		})
+	}
+}
+
+func TestDeployAgentEnvIsDeterministic(t *testing.T) {
+	cfg := testConfig()
+	cfg.Environment = map[string]string{"B_ENV": "2", "A_ENV": "1", "C_ENV": "3"}
+	cfg.ExtraAgentLabels = map[string]string{"os": "linux", "cloud": "azure", "lifecycle": "spot"}
+	p, client := newTestProvider("custom-agent:v1", cfg)
+	for id := int64(1); id <= 20; id++ {
+		require.NoError(t, p.DeployAgent(t.Context(), &woodpecker.Agent{ID: id, Name: "pool-7-agent-x", Token: "t"}))
+		pod, err := client.CoreV1().Pods(testNamespace).Get(t.Context(), podName("pool-7-agent-x", id), metav1.GetOptions{})
+		require.NoError(t, err)
+		names := make([]string, 0, len(pod.Spec.Containers[0].Env))
+		for _, e := range pod.Spec.Containers[0].Env {
+			names = append(names, e.Name)
+		}
+		assert.Equal(t, []string{
+			"TEMPLATE_ENV", "WOODPECKER_SERVER", "WOODPECKER_MAX_WORKFLOWS",
+			"A_ENV", "B_ENV", "C_ENV", "WOODPECKER_AGENT_LABELS", woodpeckerAgentSecret,
+		}, names)
+		assert.Equal(t, "cloud=azure,lifecycle=spot,os=linux", envValue(pod.Spec.Containers[0].Env, "WOODPECKER_AGENT_LABELS"))
 	}
 }
 

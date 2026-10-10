@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -20,7 +22,6 @@ import (
 
 	"go.woodpecker-ci.org/autoscaler/config"
 	"go.woodpecker-ci.org/autoscaler/engine"
-	"go.woodpecker-ci.org/autoscaler/engine/inits/cloudinit"
 	"go.woodpecker-ci.org/autoscaler/engine/types"
 	"go.woodpecker-ci.org/woodpecker/v3/woodpecker-go/woodpecker"
 )
@@ -127,14 +128,15 @@ func (p *provider) DeployAgent(ctx context.Context, agent *woodpecker.Agent) err
 		Name:  "WOODPECKER_MAX_WORKFLOWS",
 		Value: strconv.Itoa(p.config.WorkflowsPerAgent),
 	})
-	for key, value := range p.config.Environment {
+	// Sorted so every pod of a pool has one exact env, which admission allowlists.
+	for _, key := range slices.Sorted(maps.Keys(p.config.Environment)) {
 		if key == woodpeckerAgentSecret || key == woodpeckerAgentSecretFile {
 			continue
 		}
-		container.Env = append(container.Env, corev1.EnvVar{Name: key, Value: value})
+		container.Env = append(container.Env, corev1.EnvVar{Name: key, Value: p.config.Environment[key]})
 	}
 	container.Env = append(container.Env,
-		corev1.EnvVar{Name: "WOODPECKER_AGENT_LABELS", Value: cloudinit.GenExtraAgentLabels(p.config.ExtraAgentLabels)},
+		corev1.EnvVar{Name: "WOODPECKER_AGENT_LABELS", Value: sortedAgentLabels(p.config.ExtraAgentLabels)},
 		corev1.EnvVar{
 			Name: woodpeckerAgentSecret,
 			ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
@@ -236,6 +238,14 @@ func podName(agentName string, agentID int64) string {
 		name = strings.TrimRight(name[:maxNameLength], "-")
 	}
 	return name + suffix
+}
+
+func sortedAgentLabels(labels map[string]string) string {
+	out := make([]string, 0, len(labels))
+	for _, key := range slices.Sorted(maps.Keys(labels)) {
+		out = append(out, key+"="+labels[key])
+	}
+	return strings.Join(out, ",")
 }
 
 func withoutAgentSecrets(env []corev1.EnvVar) []corev1.EnvVar {
