@@ -13,7 +13,8 @@ when:
     evaluate: 'CI_COMMIT_PULL_REQUEST_LABELS contains "build_pr_images"'
 
 variables:
-  - &buildx_plugin 'docker.io/woodpeckerci/plugin-docker-buildx:6.1.2'
+  # The server runs only this exact tag as privileged; a bump must move its allowlist first.
+  - &buildx_plugin 'docker.io/woodpeckerci/plugin-docker-buildx:6.1.0'
   - &buildx_settings
     buildkit_oci_max_parallelism: 1
     dockerfile: docker/Dockerfile
