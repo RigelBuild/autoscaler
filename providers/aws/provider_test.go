@@ -179,6 +179,8 @@ func fleetOut(errs ...ec2_types.CreateFleetError) *ec2.CreateFleetOutput {
 	}
 }
 
+var errFleetAPI = errors.New("UnauthorizedOperation")
+
 func TestDeployAgentFleet(t *testing.T) {
 	agent := &woodpecker.Agent{Name: "pool-1-agent-abcd"}
 
@@ -189,6 +191,7 @@ func TestDeployAgentFleet(t *testing.T) {
 		sshKeyName       string
 		setupMocks       func(*mocks.MockClient)
 		expectedError    string
+		wantErrIs        error
 	}{
 		{
 			name: "NoTemplateUsesRunInstances",
@@ -304,9 +307,10 @@ func TestDeployAgentFleet(t *testing.T) {
 			launchTemplateID: "lt-abc",
 			setupMocks: func(client *mocks.MockClient) {
 				client.On("CreateFleet", mock.Anything, mock.Anything, mock.Anything).
-					Return(nil, errors.New("UnauthorizedOperation")).Once()
+					Return(nil, errFleetAPI).Once()
 			},
 			expectedError: "CreateFleet: UnauthorizedOperation",
+			wantErrIs:     errFleetAPI,
 		},
 		{
 			name:             "EmptyResultWithoutErrorsFails",
@@ -337,6 +341,9 @@ func TestDeployAgentFleet(t *testing.T) {
 			err := p.DeployAgent(t.Context(), agent)
 			if tt.expectedError != "" {
 				assert.ErrorContains(t, err, tt.expectedError)
+				if tt.wantErrIs != nil {
+					assert.ErrorIs(t, err, tt.wantErrIs)
+				}
 				return
 			}
 			assert.NoError(t, err)
