@@ -34,6 +34,10 @@ No Woodpecker **server** change is needed — the per-task labels are already in
 `/api/queue/info`. The design record lives in the sealed repo at
 `docs/designs/platform/label-aware-autoscaler.md` (SEA-1122).
 
+- `providers/kubernetes/` — adds a Kubernetes pod provider for scaling agent
+  workloads from queue demand. Agent pods use a supplied Pod template and a
+  per-agent Secret for registration tokens.
+
 ## Base ref & rebase policy
 
 - **Base:** upstream `woodpecker-ci/autoscaler` release `1.5.0` (pinned).
