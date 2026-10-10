@@ -54,7 +54,7 @@ func RenderUserDataTemplate(config *config.Config, agent *woodpecker.Agent, r Re
 		params.Environment[key] = value
 	}
 
-	params.Environment["WOODPECKER_AGENT_LABELS"] = genExtraAgentLabels(config.ExtraAgentLabels)
+	params.Environment["WOODPECKER_AGENT_LABELS"] = GenExtraAgentLabels(config.ExtraAgentLabels)
 
 	var userData bytes.Buffer
 	if err := tmpl.Execute(&userData, params); err != nil {
@@ -64,7 +64,8 @@ func RenderUserDataTemplate(config *config.Config, agent *woodpecker.Agent, r Re
 	return userData.String(), nil
 }
 
-func genExtraAgentLabels(conf map[string]string) string {
+// GenExtraAgentLabels formats additional labels for the Woodpecker agent.
+func GenExtraAgentLabels(conf map[string]string) string {
 	out := make([]string, 0, len(conf))
 	for k, v := range conf {
 		out = append(out, fmt.Sprintf("%s=%s", k, v))
