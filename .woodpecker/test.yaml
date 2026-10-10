@@ -2,6 +2,8 @@
 # local backend cannot run container images.
 labels:
   os: linux
+  # golangci-lint peaks ~4.2 GB with client-go, over a 4 GiB Spot pool agent.
+  size: large
 
 when:
   - event: pull_request
@@ -34,9 +36,6 @@ steps:
   - name: lint
     image: *golang_image
     depends_on: [vendor]
-    # The client-go type-check tree OOMs a 4 GiB pool agent unless compiles run one at a time.
-    environment:
-      GOFLAGS: -p=1
     commands:
       - make lint
     when: *when
