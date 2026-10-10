@@ -36,7 +36,7 @@ contains_version_file="$(grep -F -c '.github/rigel-version' "$root/.github/scrip
 expect 'version resolver reads the required source' "$contains_version_file" 1
 expect 'finalize creates the version tag' "$(grep -F -c '"${image}:${tag}" "${image}@${IMAGE_DIGEST}"' "$root/.github/scripts/finalize-images.sh")" 1
 expect 'finalize verifies resolved manifest digest' "$(grep -F -c '[ "$resolved" != "$IMAGE_DIGEST" ]' "$root/.github/scripts/finalize-images.sh")" 1
-expect 'publisher version source is initialized' "$(cat "$root/.github/rigel-version")" '1.5.0-rigel.1'
+[[ "$(cat "$root/.github/rigel-version")" =~ ^[0-9]+\.[0-9]+\.[0-9]+-rigel\.[1-9][0-9]*$ ]] || fail 'publisher version source is X.Y.Z-rigel.N'
 expect 'release source is widened for build args' "$(grep -F -c 'ARG TARGETOS TARGETARCH CI_COMMIT_SHA CI_COMMIT_TAG CI_COMMIT_BRANCH' "$root/docker/Dockerfile")" 1
 expect 'PR CI runs release static tests' "$(grep -F -c '.github/scripts/workflow-contract.test.sh' "$root/.woodpecker/test.yaml")" 1
 expect 'tag publish uses upstream Dockerfile' "$(yq -r '.jobs.publish.steps | map(select(.uses | test("docker/build-push-action"))) | .[0].with.file' "$publisher")" docker/Dockerfile
@@ -48,6 +48,16 @@ expect 'rehearsal has no registry login' "$(yq -r '.jobs.rehearsal.steps | map(s
 expect 'rehearsal has no registry output' "$(yq -r '.jobs.rehearsal.steps | map(select(.uses | test("docker/build-push-action"))) | .[0].with.outputs // "none"' "$publisher")" none
 expect 'finalize waits for release digest' "$(yq -r '.jobs.finalize.needs[]' "$publisher" | sort | paste -sd, -)" 'publish,resolve'
 expect 'finalize runs the image tag script' "$(yq -r '.jobs.finalize.steps | map(select(.name == "Apply release tags and record manifest digest")) | length' "$publisher")" 1
+# A job that runs a repo script must check out before it; a bare runner has no tree.
+for wf in "$publisher" "$release"; do
+  for job in $(yq -r '.jobs | keys | .[]' "$wf"); do
+    first_script="$(yq -r ".jobs.\"$job\".steps | to_entries | map(select(.value.run // \"\" | test(\"\\.github/scripts/\"))) | .[0].key // \"\"" "$wf")"
+    [ -n "$first_script" ] || continue
+    first_checkout="$(yq -r ".jobs.\"$job\".steps | to_entries | map(select(.value.uses // \"\" | test(\"^actions/checkout@\"))) | .[0].key // \"\"" "$wf")"
+    [ -n "$first_checkout" ] && [ "$first_checkout" -lt "$first_script" ] || fail "$job checks out before running repo scripts"
+    pass "$job checks out before running repo scripts"
+  done
+done
 expect 'release is finalized last' "$(yq -r '.jobs.finalize.steps[-1].name' "$publisher")" 'Create GitHub Release'
 expect 'no QEMU action' "$(grep -c 'docker/setup-qemu-action' "$publisher" || true)" 0
 pass 'image-publisher Requirement 5 static contract'
