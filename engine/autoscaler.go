@@ -14,14 +14,9 @@ import (
 	"go.woodpecker-ci.org/autoscaler/engine/types"
 	"go.woodpecker-ci.org/autoscaler/server"
 	"go.woodpecker-ci.org/autoscaler/utils"
+	shared_utils "go.woodpecker-ci.org/woodpecker/v3/shared/utils"
 	"go.woodpecker-ci.org/woodpecker/v3/woodpecker-go/woodpecker"
 )
-
-// agentListPageSize is the server's maxPageSize for /api/agents
-// (server/router/middleware/session/pagination.go). woodpecker-go's AgentList()
-// fetches only the first page; loadAgents warns if the fleet reaches this size,
-// since the netting step would then under-count non-pool capacity.
-const agentListPageSize = 50
 
 type Autoscaler struct {
 	client server.Client
@@ -88,22 +83,17 @@ func (a *Autoscaler) inTeardownWindow(agent *woodpecker.Agent) bool {
 func (a *Autoscaler) loadAgents(_ context.Context) error {
 	a.agents = []*woodpecker.Agent{}
 
-	agents, err := a.client.AgentList()
+	// The server caps a page at 50 agents and orders them by id, so a single
+	// request hides the agents deployed most recently -- walk every page.
+	agents, err := shared_utils.Paginate(func(page int) ([]*woodpecker.Agent, error) {
+		return a.client.AgentListWithOpts(woodpecker.AgentListOptions{
+			ListOptions: woodpecker.ListOptions{Page: page},
+		})
+	}, 0)
 	if err != nil {
-		return fmt.Errorf("client.AgentList: %w", err)
+		return fmt.Errorf("client.AgentListWithOpts: %w", err)
 	}
 
-	// The server paginates /api/agents at maxPageSize=50 and the woodpecker-go
-	// AgentList() fetches only the first page. The shared-demand netting in
-	// calcAgents needs to see free capacity on non-pool agents, so a truncated
-	// list would under-count static capacity and over-provision the pool
-	// (bounded by MaxAgents, so it errs to burst-relief, never to starvation).
-	// The real fleet is a handful of agents; warn loudly if it ever approaches
-	// the page limit so this is caught before it silently degrades.
-	if len(agents) >= agentListPageSize {
-		log.Warn().Int("agents", len(agents)).Int("page_size", agentListPageSize).
-			Msg("agent list hit the server page size; shared-demand netting may under-count non-pool capacity and over-provision (bounded by MaxAgents)")
-	}
 	a.allAgents = agents
 
 	r, err := regexp.Compile(fmt.Sprintf("pool-%s-agent-.*?", a.config.PoolID))

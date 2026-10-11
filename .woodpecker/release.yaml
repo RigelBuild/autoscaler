@@ -9,15 +9,18 @@ when:
   - event: push
     branch:
       - ${CI_REPO_DEFAULT_BRANCH}
+  - event: pull_request_metadata
+    evaluate: 'CI_COMMIT_PULL_REQUEST_LABELS contains "build_pr_images"'
 
 variables:
+  # The server runs only this exact tag as privileged; a bump must move its allowlist first.
   - &buildx_plugin 'docker.io/woodpeckerci/plugin-docker-buildx:6.1.0'
   - &buildx_settings
     buildkit_oci_max_parallelism: 1
     dockerfile: docker/Dockerfile
     repo: 'woodpeckerci/autoscaler'
     platforms: 'linux/arm/v7,linux/arm64/v8,linux/amd64,linux/ppc64le'
-  - &golang_image 'docker.io/golang:1.26'
+  - &golang_image 'docker.io/golang:1.27'
 
 steps:
   - name: vendor
@@ -33,6 +36,19 @@ steps:
       tag: test
     when:
       - event: pull_request
+        evaluate: 'not (CI_COMMIT_PULL_REQUEST_LABELS contains "build_pr_images")'
+
+  - name: publish-preview
+    image: *buildx_plugin
+    settings:
+      <<: *buildx_settings
+      tag: pull_${CI_COMMIT_PULL_REQUEST}
+      username: woodpeckerbot
+      password:
+        from_secret: docker_password
+    when:
+      - event: [pull_request, pull_request_metadata]
+        evaluate: 'CI_COMMIT_PULL_REQUEST_LABELS contains "build_pr_images"'
 
   - name: publish-next
     image: *buildx_plugin
@@ -56,6 +72,6 @@ steps:
         from_secret: docker_password
     when:
       event: tag
-      # Rigel tags publish to GHCR from .github/workflows/publish-image.yml.
+      # Rigel tags publish to GHCR from .github/workflows/publish-image.yaml.
       ref:
         exclude: refs/tags/v*-rigel.*
