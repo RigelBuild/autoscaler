@@ -739,6 +739,28 @@ func Test_cleanupDanglingAgents(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
+	t.Run("should keep the other agents in memory after removing one", func(t *testing.T) {
+		ctx := t.Context()
+		client := mocks_server.NewMockClient(t)
+		provider := mocks_provider.NewMockProvider(t)
+		kept := &woodpecker.Agent{ID: 2, Name: "pool-1-agent-2"}
+		autoscaler := Autoscaler{
+			agents: []*woodpecker.Agent{
+				{ID: 1, Name: "pool-1-agent-1"},
+				kept,
+			},
+			provider: provider,
+			client:   client,
+		}
+
+		provider.On("ListDeployedAgentNames", mock.Anything).Return([]string{"pool-1-agent-2"}, nil)
+		client.On("AgentDelete", int64(1)).Return(nil)
+
+		err := autoscaler.cleanupDanglingAgents(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, []*woodpecker.Agent{kept}, autoscaler.agents)
+	})
+
 	t.Run("should remove agent that is only present on provider (not woodpecker) once grace has elapsed", func(t *testing.T) {
 		ctx := t.Context()
 		client := mocks_server.NewMockClient(t)
