@@ -375,14 +375,14 @@ func (a *Autoscaler) cleanupDanglingAgents(ctx context.Context) error {
 				return fmt.Errorf("client.AgentDelete: %w", err)
 			}
 
-			// remove agent from woodpeckerAgents
-			_woodpeckerAgents := make([]*woodpecker.Agent, 0)
-			for _, a := range a.agents {
-				if a.Name != agent.Name {
-					woodpeckerAgents = append(woodpeckerAgents, a)
+			// remove agent from the in-memory agent list
+			remaining := make([]*woodpecker.Agent, 0, len(a.agents))
+			for _, other := range a.agents {
+				if other.Name != agent.Name {
+					remaining = append(remaining, other)
 				}
 			}
-			a.agents = _woodpeckerAgents
+			a.agents = remaining
 		}
 	}
 
