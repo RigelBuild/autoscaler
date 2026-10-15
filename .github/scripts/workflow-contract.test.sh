@@ -77,6 +77,9 @@ expect 'mint takes an App token on every run' "$(yq -r '.jobs.mint.steps | map(s
 expect 'mint uses the E1 client ID' "$(yq -r '.jobs.mint.steps | map(select(.uses | test("actions/create-github-app-token"))) | .[0].with.client-id' "$release")" '${{ vars.AUTOMATION_APP_CLIENT_ID }}'
 expect 'mint uses the E1 private key' "$(yq -r '.jobs.mint.steps | map(select(.uses | test("actions/create-github-app-token"))) | .[0].with.private-key' "$release")" '${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}'
 expect 'mint token has contents write' "$(yq -r '.jobs.mint.steps | map(select(.uses | test("actions/create-github-app-token"))) | .[0].with.permission-contents' "$release")" write
+# workflows: write lets GitHub create a tag at a commit whose workflow tree matches no branch tip.
+expect 'mint token has contents and workflows only' "$(yq -r '.jobs.mint.steps | map(select(.uses | test("actions/create-github-app-token"))) | .[0].with | keys | map(select(test("^permission-"))) | sort | join(",")' "$release")" permission-contents,permission-workflows
+expect 'mint token has workflows write' "$(yq -r '.jobs.mint.steps | map(select(.uses | test("actions/create-github-app-token"))) | .[0].with.permission-workflows' "$release")" write
 expect 'mint token is repository scoped' "$(yq -r '.jobs.mint.steps | map(select(.uses | test("actions/create-github-app-token"))) | .[0].with.repositories' "$release")" autoscaler
 expect 'dispatch takes no inputs' "$(yq -r '.on.workflow_dispatch.inputs // "none"' "$release")" none
 expect 'mint has no concurrency' "$(yq -r '.jobs.mint.concurrency // "none"' "$release")" none

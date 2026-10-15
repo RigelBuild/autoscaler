@@ -52,6 +52,7 @@ jobs:
           client-id: ${{ vars.AUTOMATION_APP_CLIENT_ID }}
           private-key: ${{ secrets.AUTOMATION_APP_PRIVATE_KEY }}
           permission-contents: write
+          permission-workflows: write
           repositories: autoscaler
 
       - name: Mint release tag if needed
