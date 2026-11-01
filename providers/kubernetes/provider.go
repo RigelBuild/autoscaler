@@ -57,8 +57,12 @@ func New(_ context.Context, c *cli.Command, config *config.Config) (types.Provid
 	if err != nil {
 		return nil, err
 	}
-	templateHash, err := hashPodTemplate(podTemplate)
-	if err != nil {
+	p := &provider{
+		namespace:   namespace,
+		config:      config,
+		podTemplate: podTemplate,
+	}
+	if p.templateHash, err = p.hashAgentPod(); err != nil {
 		return nil, err
 	}
 
@@ -66,27 +70,21 @@ func New(_ context.Context, c *cli.Command, config *config.Config) (types.Provid
 	if err != nil {
 		return nil, fmt.Errorf("build kubernetes client config: %w", err)
 	}
-	client, err := kubernetes.NewForConfig(restConfig)
-	if err != nil {
+	if p.client, err = kubernetes.NewForConfig(restConfig); err != nil {
 		return nil, fmt.Errorf("create kubernetes client: %w", err)
 	}
-
-	return &provider{
-		client:       client,
-		namespace:    namespace,
-		config:       config,
-		podTemplate:  podTemplate,
-		templateHash: templateHash,
-	}, nil
+	return p, nil
 }
 
-func hashPodTemplate(podTemplate corev1.Pod) (string, error) {
-	templateData, err := json.Marshal(podTemplate)
+// hashAgentPod hashes the pod DeployAgent builds, not just the template, so a change
+// to config-derived image or env also marks running agents outdated.
+func (p *provider) hashAgentPod() (string, error) {
+	podData, err := json.Marshal(p.agentPod("agent", "agent"))
 	if err != nil {
-		return "", fmt.Errorf("marshal kubernetes pod template: %w", err)
+		return "", fmt.Errorf("marshal kubernetes agent pod: %w", err)
 	}
-	templateDigest := sha256.Sum256(templateData)
-	return hex.EncodeToString(templateDigest[:])[:16], nil
+	podDigest := sha256.Sum256(podData)
+	return hex.EncodeToString(podDigest[:])[:16], nil
 }
 
 func loadPodTemplate(path string) (corev1.Pod, error) {
@@ -117,6 +115,39 @@ func loadPodTemplate(path string) (corev1.Pod, error) {
 
 func (p *provider) DeployAgent(ctx context.Context, agent *woodpecker.Agent) error {
 	name := podName(agent.Name, agent.ID)
+	pod := p.agentPod(name, agent.Name)
+	pod.Annotations[templateHashAnnotation] = p.templateHash
+
+	createdPod, err := p.client.CoreV1().Pods(p.namespace).Create(ctx, pod, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("create Kubernetes agent pod: %w", err)
+	}
+
+	_, err = p.client.CoreV1().Secrets(p.namespace).Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: p.namespace,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "v1",
+				Kind:       "Pod",
+				Name:       createdPod.Name,
+				UID:        createdPod.UID,
+				Controller: ptr.To(false),
+			}},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{woodpeckerAgentSecret: []byte(agent.Token)},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		if cleanupErr := p.client.CoreV1().Pods(p.namespace).Delete(ctx, createdPod.Name, metav1.DeleteOptions{}); cleanupErr != nil && !apierrors.IsNotFound(cleanupErr) {
+			return errors.Join(fmt.Errorf("create Kubernetes agent secret: %w", err), fmt.Errorf("delete pod after Secret creation failure: %w", cleanupErr))
+		}
+		return fmt.Errorf("create Kubernetes agent secret: %w", err)
+	}
+	return nil
+}
+
+func (p *provider) agentPod(name, agentName string) *corev1.Pod {
 	pod := p.podTemplate.DeepCopy()
 	pod.Name = name
 	pod.Namespace = p.namespace
@@ -127,8 +158,7 @@ func (p *provider) DeployAgent(ctx context.Context, agent *woodpecker.Agent) err
 	if pod.Annotations == nil {
 		pod.Annotations = make(map[string]string)
 	}
-	pod.Annotations[agentNameAnnotation] = agent.Name
-	pod.Annotations[templateHashAnnotation] = p.templateHash
+	pod.Annotations[agentNameAnnotation] = agentName
 	if pod.Spec.RestartPolicy == "" {
 		pod.Spec.RestartPolicy = corev1.RestartPolicyAlways
 	}
@@ -165,34 +195,7 @@ func (p *provider) DeployAgent(ctx context.Context, agent *woodpecker.Agent) err
 			}},
 		},
 	)
-
-	createdPod, err := p.client.CoreV1().Pods(p.namespace).Create(ctx, pod, metav1.CreateOptions{})
-	if err != nil {
-		return fmt.Errorf("create Kubernetes agent pod: %w", err)
-	}
-
-	_, err = p.client.CoreV1().Secrets(p.namespace).Create(ctx, &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: p.namespace,
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: "v1",
-				Kind:       "Pod",
-				Name:       createdPod.Name,
-				UID:        createdPod.UID,
-				Controller: ptr.To(false),
-			}},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{woodpeckerAgentSecret: []byte(agent.Token)},
-	}, metav1.CreateOptions{})
-	if err != nil {
-		if cleanupErr := p.client.CoreV1().Pods(p.namespace).Delete(ctx, createdPod.Name, metav1.DeleteOptions{}); cleanupErr != nil && !apierrors.IsNotFound(cleanupErr) {
-			return errors.Join(fmt.Errorf("create Kubernetes agent secret: %w", err), fmt.Errorf("delete pod after Secret creation failure: %w", cleanupErr))
-		}
-		return fmt.Errorf("create Kubernetes agent secret: %w", err)
-	}
-	return nil
+	return pod
 }
 
 func (p *provider) RemoveAgent(ctx context.Context, agent *woodpecker.Agent) error {

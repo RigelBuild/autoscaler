@@ -310,6 +310,15 @@ func TestPodTemplateHash(t *testing.T) {
 	changedTemplate.Spec.Containers[0].Env[0].Value = "changed"
 	changed, _ := newTestProviderWithTemplate(t, *changedTemplate, testConfig())
 	assert.NotEqual(t, first.templateHash, changed.templateHash)
+
+	// An empty template image falls back to config.Image, so that config drives the hash too.
+	oldImageCfg := testConfig()
+	oldImageCfg.Image = "agent:v1"
+	newImageCfg := testConfig()
+	newImageCfg.Image = "agent:v2"
+	oldImage, _ := newTestProvider(t, "", oldImageCfg)
+	newImage, _ := newTestProvider(t, "", newImageCfg)
+	assert.NotEqual(t, oldImage.templateHash, newImage.templateHash)
 }
 
 func TestLoadPodTemplate(t *testing.T) {
@@ -375,15 +384,16 @@ func newTestProvider(t *testing.T, templateImage string, cfg *config.Config) (*p
 func newTestProviderWithTemplate(t *testing.T, podTemplate corev1.Pod, cfg *config.Config) (*provider, *fake.Clientset) {
 	t.Helper()
 	client := fake.NewSimpleClientset()
-	hash, err := hashPodTemplate(podTemplate)
+	p := &provider{
+		client:      client,
+		namespace:   testNamespace,
+		config:      cfg,
+		podTemplate: podTemplate,
+	}
+	var err error
+	p.templateHash, err = p.hashAgentPod()
 	require.NoError(t, err)
-	return &provider{
-		client:       client,
-		namespace:    testNamespace,
-		config:       cfg,
-		podTemplate:  podTemplate,
-		templateHash: hash,
-	}, client
+	return p, client
 }
 
 func actionSummaries(actions []ktesting.Action) []string {
