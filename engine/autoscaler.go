@@ -121,7 +121,7 @@ func (a *Autoscaler) getPoolAgents(excludeNoSchedule bool) []*woodpecker.Agent {
 	return agents
 }
 
-func (a *Autoscaler) createAgents(ctx context.Context, amount int) error {
+func (a *Autoscaler) createAgents(ctx context.Context, amount int, outdated map[string]struct{}) error {
 	suffixLength := 4
 
 	reactivatedAgents := 0
@@ -129,7 +129,10 @@ func (a *Autoscaler) createAgents(ctx context.Context, amount int) error {
 	// try to re-activate agents that are in no-schedule state
 	for i := 0; i < amount; i++ {
 		for _, agent := range a.agents {
-			if agent.NoSchedule {
+			// An outdated agent was drained to be replaced; reactivating it would
+			// count it as capacity and the scaler would never deploy its replacement.
+			_, isOutdated := outdated[agent.Name]
+			if agent.NoSchedule && !isOutdated {
 				log.Info().Str("agent", agent.Name).Msg("reactivate agent")
 				agent.NoSchedule = false
 				_, err := a.client.AgentUpdate(agent)
@@ -198,6 +201,38 @@ func (a *Autoscaler) drainAgents(_ context.Context, amount int) error {
 		}
 	}
 
+	return nil
+}
+
+func (a *Autoscaler) outdatedAgentNames(ctx context.Context) (map[string]struct{}, error) {
+	lister, ok := a.provider.(types.OutdatedAgentLister)
+	if !ok {
+		return nil, nil
+	}
+
+	names, err := lister.ListOutdatedAgentNames(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list outdated agent names: %w", err)
+	}
+	outdated := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		outdated[name] = struct{}{}
+	}
+	return outdated, nil
+}
+
+func (a *Autoscaler) drainOutdatedAgents(outdated map[string]struct{}) error {
+	for _, agent := range a.getPoolAgents(false) {
+		if _, ok := outdated[agent.Name]; !ok || agent.NoSchedule || agent.LastContact == 0 {
+			continue
+		}
+
+		agent.NoSchedule = true
+		if _, err := a.client.AgentUpdate(agent); err != nil {
+			return fmt.Errorf("client.AgentUpdate: %w", err)
+		}
+		log.Info().Str("agent", agent.Name).Msg("drain outdated agent")
+	}
 	return nil
 }
 
@@ -574,6 +609,11 @@ func (a *Autoscaler) Reconcile(ctx context.Context) error {
 		return fmt.Errorf("loading agents failed: %w", err)
 	}
 
+	outdated, err := a.outdatedAgentNames(ctx)
+	if err != nil {
+		return fmt.Errorf("listing outdated agents failed: %w", err)
+	}
+
 	reqPoolAgents, err := a.calcAgents(ctx)
 	if err != nil {
 		return fmt.Errorf("calculating agents failed: %w", err)
@@ -583,7 +623,7 @@ func (a *Autoscaler) Reconcile(ctx context.Context) error {
 		num := int(math.Abs(reqPoolAgents))
 		log.Debug().Msgf("starting %d additional agents", num)
 
-		if err := a.createAgents(ctx, num); err != nil {
+		if err := a.createAgents(ctx, num, outdated); err != nil {
 			return fmt.Errorf("creating agents failed: %w", err)
 		}
 	}
@@ -595,6 +635,9 @@ func (a *Autoscaler) Reconcile(ctx context.Context) error {
 		if err := a.drainAgents(ctx, num); err != nil {
 			return fmt.Errorf("draining agents failed: %w", err)
 		}
+	}
+	if err := a.drainOutdatedAgents(outdated); err != nil {
+		return fmt.Errorf("draining outdated agents failed: %w", err)
 	}
 
 	// cleanup agents that are only present at the provider or woodpecker

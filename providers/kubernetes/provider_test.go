@@ -42,7 +42,7 @@ func TestDeployAgent(t *testing.T) {
 			cfg.GRPCSecure = tt.grpcSecure
 			cfg.Environment[woodpeckerAgentSecret] = "config-override"
 			cfg.Environment[woodpeckerAgentSecretFile] = "config-file-override"
-			p, client := newTestProvider(tt.templateImage, cfg)
+			p, client := newTestProvider(t, tt.templateImage, cfg)
 			client.PrependReactor("create", "pods", func(action ktesting.Action) (bool, runtime.Object, error) {
 				createAction, ok := action.(ktesting.CreateAction)
 				if !ok {
@@ -62,6 +62,7 @@ func TestDeployAgent(t *testing.T) {
 			pod, err := client.CoreV1().Pods(testNamespace).Get(t.Context(), "pool-7-agent-abcxyz-42", metav1.GetOptions{})
 			require.NoError(t, err)
 			assert.Equal(t, agent.Name, pod.Annotations[agentNameAnnotation])
+			assert.Equal(t, p.templateHash, pod.Annotations[templateHashAnnotation])
 			assert.Equal(t, testPoolID, pod.Labels[engine.LabelPool])
 			assert.Equal(t, "custom", pod.Annotations["template-annotation"])
 			assert.Equal(t, "woodpecker", pod.Spec.ServiceAccountName)
@@ -115,7 +116,7 @@ func TestDeployAgentEnvIsDeterministic(t *testing.T) {
 	cfg := testConfig()
 	cfg.Environment = map[string]string{"B_ENV": "2", "A_ENV": "1", "C_ENV": "3"}
 	cfg.ExtraAgentLabels = map[string]string{"os": "linux", "cloud": "azure", "lifecycle": "spot"}
-	p, client := newTestProvider("custom-agent:v1", cfg)
+	p, client := newTestProvider(t, "custom-agent:v1", cfg)
 	for id := int64(1); id <= 20; id++ {
 		require.NoError(t, p.DeployAgent(t.Context(), &woodpecker.Agent{ID: id, Name: "pool-7-agent-x", Token: "t"}))
 		pod, err := client.CoreV1().Pods(testNamespace).Get(t.Context(), podName("pool-7-agent-x", id), metav1.GetOptions{})
@@ -133,7 +134,7 @@ func TestDeployAgentEnvIsDeterministic(t *testing.T) {
 }
 
 func TestDeployAgentPodCreateFailureDoesNotCreateSecret(t *testing.T) {
-	p, client := newTestProvider("", testConfig())
+	p, client := newTestProvider(t, "", testConfig())
 	var secretReadsOrDeletes int
 	client.PrependReactor("get", "secrets", func(ktesting.Action) (bool, runtime.Object, error) {
 		secretReadsOrDeletes++
@@ -154,7 +155,7 @@ func TestDeployAgentPodCreateFailureDoesNotCreateSecret(t *testing.T) {
 }
 
 func TestDeployAgentSecretCreateFailureDeletesPod(t *testing.T) {
-	p, client := newTestProvider("", testConfig())
+	p, client := newTestProvider(t, "", testConfig())
 	client.PrependReactor("create", "secrets", func(ktesting.Action) (bool, runtime.Object, error) {
 		return true, nil, errors.New("secret create rejected")
 	})
@@ -166,7 +167,7 @@ func TestDeployAgentSecretCreateFailureDeletesPod(t *testing.T) {
 }
 
 func TestRemoveAgent(t *testing.T) {
-	p, client := newTestProvider("", testConfig())
+	p, client := newTestProvider(t, "", testConfig())
 	agent := &woodpecker.Agent{ID: 12, Name: "pool-7-agent-AbC", Token: "token"}
 	require.NoError(t, p.DeployAgent(t.Context(), agent))
 	require.NoError(t, p.RemoveAgent(t.Context(), agent))
@@ -178,7 +179,7 @@ func TestRemoveAgent(t *testing.T) {
 }
 
 func TestRemoveAgentWithoutIDFindsPodByAnnotation(t *testing.T) {
-	p, client := newTestProvider("", testConfig())
+	p, client := newTestProvider(t, "", testConfig())
 	podName := "pool-7-agent-abc-99"
 	_, err := client.CoreV1().Pods(testNamespace).Create(t.Context(), &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -207,7 +208,7 @@ func TestRemoveAgentWithoutIDFindsPodByAnnotation(t *testing.T) {
 }
 
 func TestListDeployedAgentNames(t *testing.T) {
-	p, client := newTestProvider("", testConfig())
+	p, client := newTestProvider(t, "", testConfig())
 	for _, pod := range []*corev1.Pod{
 		{
 			ObjectMeta: metav1.ObjectMeta{
@@ -242,6 +243,73 @@ func TestListDeployedAgentNames(t *testing.T) {
 	names, err := p.ListDeployedAgentNames(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, []string{"pool-7-agent-AbC"}, names)
+}
+
+func TestListOutdatedAgentNames(t *testing.T) {
+	p, client := newTestProvider(t, "custom-agent:v1", testConfig())
+	oldHash := "0123456789abcdef"
+	for _, pod := range []*corev1.Pod{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "current",
+				Namespace:   testNamespace,
+				Labels:      map[string]string{engine.LabelPool: testPoolID},
+				Annotations: map[string]string{agentNameAnnotation: "current-agent", templateHashAnnotation: p.templateHash},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "old-hash",
+				Namespace:   testNamespace,
+				Labels:      map[string]string{engine.LabelPool: testPoolID},
+				Annotations: map[string]string{agentNameAnnotation: "old-agent", templateHashAnnotation: oldHash},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "missing-hash",
+				Namespace:   testNamespace,
+				Labels:      map[string]string{engine.LabelPool: testPoolID},
+				Annotations: map[string]string{agentNameAnnotation: "missing-hash-agent"},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "missing-agent-name",
+				Namespace: testNamespace,
+				Labels:    map[string]string{engine.LabelPool: testPoolID},
+				Annotations: map[string]string{
+					templateHashAnnotation: oldHash,
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "other-pool",
+				Namespace:   testNamespace,
+				Labels:      map[string]string{engine.LabelPool: "pool-8"},
+				Annotations: map[string]string{agentNameAnnotation: "other-pool-agent", templateHashAnnotation: oldHash},
+			},
+		},
+	} {
+		_, err := client.CoreV1().Pods(testNamespace).Create(t.Context(), pod, metav1.CreateOptions{})
+		require.NoError(t, err)
+	}
+
+	names, err := p.ListOutdatedAgentNames(t.Context())
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"old-agent", "missing-hash-agent"}, names)
+}
+
+func TestPodTemplateHash(t *testing.T) {
+	first, _ := newTestProvider(t, "custom-agent:v1", testConfig())
+	identical, _ := newTestProvider(t, "custom-agent:v1", testConfig())
+	assert.Equal(t, first.templateHash, identical.templateHash)
+
+	changedTemplate := first.podTemplate.DeepCopy()
+	changedTemplate.Spec.Containers[0].Env[0].Value = "changed"
+	changed, _ := newTestProviderWithTemplate(t, *changedTemplate, testConfig())
+	assert.NotEqual(t, first.templateHash, changed.templateHash)
 }
 
 func TestLoadPodTemplate(t *testing.T) {
@@ -281,8 +349,8 @@ func TestLoadPodTemplate(t *testing.T) {
 	}
 }
 
-func newTestProvider(templateImage string, cfg *config.Config) (*provider, *fake.Clientset) {
-	client := fake.NewSimpleClientset()
+func newTestProvider(t *testing.T, templateImage string, cfg *config.Config) (*provider, *fake.Clientset) {
+	t.Helper()
 	podTemplate := corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:      map[string]string{"template-label": "kept"},
@@ -301,11 +369,20 @@ func newTestProvider(templateImage string, cfg *config.Config) (*provider, *fake
 			}},
 		},
 	}
+	return newTestProviderWithTemplate(t, podTemplate, cfg)
+}
+
+func newTestProviderWithTemplate(t *testing.T, podTemplate corev1.Pod, cfg *config.Config) (*provider, *fake.Clientset) {
+	t.Helper()
+	client := fake.NewSimpleClientset()
+	hash, err := hashPodTemplate(podTemplate)
+	require.NoError(t, err)
 	return &provider{
-		client:      client,
-		namespace:   testNamespace,
-		config:      cfg,
-		podTemplate: podTemplate,
+		client:       client,
+		namespace:    testNamespace,
+		config:       cfg,
+		podTemplate:  podTemplate,
+		templateHash: hash,
 	}, client
 }
 

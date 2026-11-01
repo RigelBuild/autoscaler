@@ -2,6 +2,9 @@ package kubernetes
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -28,6 +31,7 @@ import (
 
 const (
 	agentNameAnnotation       = "wp.autoscaler/agent-name"
+	templateHashAnnotation    = "wp.autoscaler/template-hash"
 	woodpeckerAgentSecret     = "WOODPECKER_AGENT_SECRET"
 	woodpeckerAgentSecretFile = "WOODPECKER_AGENT_SECRET_FILE"
 	maxPodNameLength          = 253
@@ -36,10 +40,11 @@ const (
 var invalidPodNameCharacters = regexp.MustCompile(`[^a-z0-9-]+`)
 
 type provider struct {
-	client      kubernetes.Interface
-	namespace   string
-	config      *config.Config
-	podTemplate corev1.Pod
+	client       kubernetes.Interface
+	namespace    string
+	config       *config.Config
+	podTemplate  corev1.Pod
+	templateHash string
 }
 
 func New(_ context.Context, c *cli.Command, config *config.Config) (types.Provider, error) {
@@ -49,6 +54,10 @@ func New(_ context.Context, c *cli.Command, config *config.Config) (types.Provid
 	}
 
 	podTemplate, err := loadPodTemplate(c.String("kubernetes-pod-template-file"))
+	if err != nil {
+		return nil, err
+	}
+	templateHash, err := hashPodTemplate(podTemplate)
 	if err != nil {
 		return nil, err
 	}
@@ -63,11 +72,21 @@ func New(_ context.Context, c *cli.Command, config *config.Config) (types.Provid
 	}
 
 	return &provider{
-		client:      client,
-		namespace:   namespace,
-		config:      config,
-		podTemplate: podTemplate,
+		client:       client,
+		namespace:    namespace,
+		config:       config,
+		podTemplate:  podTemplate,
+		templateHash: templateHash,
 	}, nil
+}
+
+func hashPodTemplate(podTemplate corev1.Pod) (string, error) {
+	templateData, err := json.Marshal(podTemplate)
+	if err != nil {
+		return "", fmt.Errorf("marshal kubernetes pod template: %w", err)
+	}
+	templateDigest := sha256.Sum256(templateData)
+	return hex.EncodeToString(templateDigest[:])[:16], nil
 }
 
 func loadPodTemplate(path string) (corev1.Pod, error) {
@@ -109,6 +128,7 @@ func (p *provider) DeployAgent(ctx context.Context, agent *woodpecker.Agent) err
 		pod.Annotations = make(map[string]string)
 	}
 	pod.Annotations[agentNameAnnotation] = agent.Name
+	pod.Annotations[templateHashAnnotation] = p.templateHash
 	if pod.Spec.RestartPolicy == "" {
 		pod.Spec.RestartPolicy = corev1.RestartPolicyAlways
 	}
@@ -214,6 +234,28 @@ func (p *provider) ListDeployedAgentNames(ctx context.Context) ([]string, error)
 	names := make([]string, 0, len(pods.Items))
 	for i := range pods.Items {
 		if name, ok := pods.Items[i].Annotations[agentNameAnnotation]; ok {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}
+
+func (p *provider) ListOutdatedAgentNames(ctx context.Context) ([]string, error) {
+	pods, err := p.client.CoreV1().Pods(p.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: engine.LabelPool + "=" + p.config.PoolID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list Kubernetes agent pods: %w", err)
+	}
+
+	names := make([]string, 0, len(pods.Items))
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		name, ok := pod.Annotations[agentNameAnnotation]
+		if !ok {
+			continue
+		}
+		if pod.Annotations[templateHashAnnotation] != p.templateHash {
 			names = append(names, name)
 		}
 	}

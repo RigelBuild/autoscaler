@@ -44,3 +44,9 @@ type Provider interface {
 	// selects the engine's teardown policy for idle agents.
 	BillingModel() BillingModel
 }
+
+// OutdatedAgentLister is implemented by providers that can tell when a deployed
+// agent was built from an older agent template than the one now loaded.
+type OutdatedAgentLister interface {
+	ListOutdatedAgentNames(context.Context) ([]string, error)
+}

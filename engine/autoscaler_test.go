@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -686,7 +687,7 @@ func Test_createAgents(t *testing.T) {
 		client.On("AgentCreate", mock.Anything).Return(&woodpecker.Agent{Name: "pool-1-agent-1"}, nil)
 		provider.On("DeployAgent", ctx, mock.Anything).Return(nil)
 
-		err := autoscaler.createAgents(ctx, 1)
+		err := autoscaler.createAgents(ctx, 1, nil)
 		assert.NoError(t, err)
 	})
 
@@ -714,8 +715,31 @@ func Test_createAgents(t *testing.T) {
 		client.On("AgentCreate", mock.Anything).Return(&woodpecker.Agent{Name: "pool-1-agent-1"}, nil)
 		provider.On("DeployAgent", ctx, mock.Anything).Return(nil)
 
-		err := autoscaler.createAgents(ctx, 2)
+		err := autoscaler.createAgents(ctx, 2, nil)
 		assert.NoError(t, err)
+	})
+
+	t.Run("replaces outdated agents instead of reactivating them", func(t *testing.T) {
+		ctx := t.Context()
+		client := mocks_server.NewMockClient(t)
+		provider := mocks_provider.NewMockProvider(t)
+		outdatedAgent := &woodpecker.Agent{ID: 9, Name: "pool-1-agent-old", NoSchedule: true}
+		autoscaler := Autoscaler{
+			client:   client,
+			provider: provider,
+			agents:   []*woodpecker.Agent{outdatedAgent},
+			config:   &config.Config{PoolID: "1"},
+		}
+
+		client.On("AgentCreate", mock.Anything).Return(&woodpecker.Agent{Name: "pool-1-agent-new"}, nil).Twice()
+		provider.On("DeployAgent", ctx, mock.Anything).Return(nil).Twice()
+
+		err := autoscaler.createAgents(ctx, 2, map[string]struct{}{"pool-1-agent-old": {}})
+		require.NoError(t, err)
+		assert.True(t, outdatedAgent.NoSchedule)
+		client.AssertNotCalled(t, "AgentUpdate", mock.Anything)
+		client.AssertNumberOfCalls(t, "AgentCreate", 2)
+		provider.AssertNumberOfCalls(t, "DeployAgent", 2)
 	})
 }
 
@@ -1114,6 +1138,102 @@ func Test_drainAgents(t *testing.T) {
 		err := autoscaler.drainAgents(ctx, 1)
 		assert.NoError(t, err)
 		assert.False(t, autoscaler.agents[0].NoSchedule)
+	})
+}
+
+type outdatedAgentTestProvider struct {
+	*mocks_provider.MockProvider
+	names []string
+	err   error
+}
+
+func (p *outdatedAgentTestProvider) ListOutdatedAgentNames(context.Context) ([]string, error) {
+	return p.names, p.err
+}
+
+func Test_drainOutdatedAgents(t *testing.T) {
+	t.Run("drains outdated schedulable contacted pool agents", func(t *testing.T) {
+		client := mocks_server.NewMockClient(t)
+		mockProvider := mocks_provider.NewMockProvider(t)
+		provider := &outdatedAgentTestProvider{
+			MockProvider: mockProvider,
+			names: []string{
+				"pool-1-agent-outdated",
+				"pool-1-agent-already-draining",
+				"pool-1-agent-never-contacted",
+				"pool-2-agent-non-pool",
+			},
+		}
+		agents := []*woodpecker.Agent{
+			{ID: 1, Name: "pool-1-agent-outdated", LastContact: time.Now().Unix()},
+			{ID: 2, Name: "pool-1-agent-already-draining", NoSchedule: true, LastContact: time.Now().Unix()},
+			{ID: 3, Name: "pool-1-agent-never-contacted"},
+			{ID: 4, Name: "pool-1-agent-current", LastContact: time.Now().Unix()},
+		}
+		nonPoolAgent := &woodpecker.Agent{ID: 5, Name: "pool-2-agent-non-pool", LastContact: time.Now().Unix()}
+		autoscaler := Autoscaler{
+			agents:    agents,
+			allAgents: append(append([]*woodpecker.Agent{}, agents...), nonPoolAgent),
+			provider:  provider,
+			client:    client,
+		}
+		client.On("AgentUpdate", mock.MatchedBy(func(agent *woodpecker.Agent) bool {
+			return agent.ID == 1 && agent.Name == "pool-1-agent-outdated" && agent.NoSchedule
+		})).Return(&woodpecker.Agent{ID: 1, Name: "pool-1-agent-outdated", NoSchedule: true}, nil).Once()
+
+		outdated, err := autoscaler.outdatedAgentNames(t.Context())
+		require.NoError(t, err)
+		err = autoscaler.drainOutdatedAgents(outdated)
+		require.NoError(t, err)
+		assert.True(t, agents[0].NoSchedule)
+		assert.True(t, agents[1].NoSchedule)
+		assert.False(t, agents[2].NoSchedule)
+		assert.False(t, agents[3].NoSchedule)
+		assert.False(t, nonPoolAgent.NoSchedule)
+		client.AssertNumberOfCalls(t, "AgentUpdate", 1)
+	})
+
+	t.Run("provider without outdated listing is a no-op", func(t *testing.T) {
+		client := mocks_server.NewMockClient(t)
+		provider := mocks_provider.NewMockProvider(t)
+		autoscaler := Autoscaler{
+			agents: []*woodpecker.Agent{{
+				ID:          1,
+				Name:        "pool-1-agent-outdated",
+				LastContact: time.Now().Unix(),
+			}},
+			provider: provider,
+			client:   client,
+		}
+
+		outdated, err := autoscaler.outdatedAgentNames(t.Context())
+		require.NoError(t, err)
+		require.Nil(t, outdated)
+		require.NoError(t, autoscaler.drainOutdatedAgents(outdated))
+		client.AssertNotCalled(t, "AgentUpdate", mock.Anything)
+	})
+
+	t.Run("lister error stops reconcile before scaling", func(t *testing.T) {
+		client := mocks_server.NewMockClient(t)
+		provider := &outdatedAgentTestProvider{
+			MockProvider: mocks_provider.NewMockProvider(t),
+			err:          fmt.Errorf("pods list denied"),
+		}
+		client.On("AgentListWithOpts", woodpecker.AgentListOptions{ListOptions: woodpecker.ListOptions{Page: 1}}).Return([]*woodpecker.Agent{
+			{ID: 1, Name: "pool-1-agent-outdated", LastContact: time.Now().Unix()},
+		}, nil)
+		client.On("AgentListWithOpts", woodpecker.AgentListOptions{ListOptions: woodpecker.ListOptions{Page: 2}}).Return([]*woodpecker.Agent{}, nil)
+		autoscaler := Autoscaler{
+			provider: provider,
+			client:   client,
+			config:   &config.Config{PoolID: "1"},
+		}
+
+		err := autoscaler.Reconcile(t.Context())
+		require.ErrorContains(t, err, "pods list denied")
+		client.AssertNotCalled(t, "QueueInfo")
+		client.AssertNotCalled(t, "AgentUpdate", mock.Anything)
+		client.AssertNotCalled(t, "AgentCreate", mock.Anything)
 	})
 }
 
