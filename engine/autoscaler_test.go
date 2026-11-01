@@ -1213,6 +1213,22 @@ func Test_drainOutdatedAgents(t *testing.T) {
 		client.AssertNotCalled(t, "AgentUpdate", mock.Anything)
 	})
 
+	t.Run("agent update error is returned", func(t *testing.T) {
+		client := mocks_server.NewMockClient(t)
+		client.On("AgentUpdate", mock.Anything).Return(nil, fmt.Errorf("server unavailable"))
+		autoscaler := Autoscaler{
+			agents: []*woodpecker.Agent{{
+				ID:          1,
+				Name:        "pool-1-agent-outdated",
+				LastContact: time.Now().Unix(),
+			}},
+			client: client,
+		}
+
+		err := autoscaler.drainOutdatedAgents(map[string]struct{}{"pool-1-agent-outdated": {}})
+		require.ErrorContains(t, err, "server unavailable")
+	})
+
 	t.Run("lister error stops reconcile before scaling", func(t *testing.T) {
 		client := mocks_server.NewMockClient(t)
 		provider := &outdatedAgentTestProvider{

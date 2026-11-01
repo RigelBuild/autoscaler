@@ -301,6 +301,17 @@ func TestListOutdatedAgentNames(t *testing.T) {
 	assert.ElementsMatch(t, []string{"old-agent", "missing-hash-agent"}, names)
 }
 
+func TestListOutdatedAgentNamesListError(t *testing.T) {
+	p, client := newTestProvider(t, "custom-agent:v1", testConfig())
+	client.PrependReactor("list", "pods", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("pods list denied")
+	})
+
+	names, err := p.ListOutdatedAgentNames(t.Context())
+	require.ErrorContains(t, err, "pods list denied")
+	assert.Nil(t, names)
+}
+
 func TestPodTemplateHash(t *testing.T) {
 	first, _ := newTestProvider(t, "custom-agent:v1", testConfig())
 	identical, _ := newTestProvider(t, "custom-agent:v1", testConfig())
