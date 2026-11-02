@@ -1041,7 +1041,7 @@ func Test_isAgentIdle(t *testing.T) {
 			ID:         1,
 			Name:       "pool-1-agent-1",
 			NoSchedule: false,
-		})
+		}, false)
 		assert.NoError(t, err)
 		assert.False(t, idle)
 	})
@@ -1062,7 +1062,7 @@ func Test_isAgentIdle(t *testing.T) {
 			Name:       "pool-1-agent-1",
 			NoSchedule: false,
 			LastWork:   time.Now().Add(-time.Minute * 10).Unix(),
-		})
+		}, false)
 		assert.NoError(t, err)
 		assert.False(t, idle)
 	})
@@ -1083,7 +1083,24 @@ func Test_isAgentIdle(t *testing.T) {
 			Name:       "pool-1-agent-1",
 			NoSchedule: false,
 			LastWork:   time.Now().Add(-time.Minute * 20).Unix(), // last work 20 minutes ago
-		})
+		}, false)
+		assert.NoError(t, err)
+		assert.True(t, idle)
+	})
+
+	t.Run("outdated agent with recent work but no tasks is idle", func(t *testing.T) {
+		client := mocks_server.NewMockClient(t)
+		autoscaler := Autoscaler{
+			client: client,
+			config: &config.Config{AgentIdleTimeout: time.Minute * 15},
+		}
+		client.On("AgentTasksList", int64(1)).Return(nil, nil)
+
+		idle, err := autoscaler.isAgentIdle(&woodpecker.Agent{
+			ID:       1,
+			Name:     "pool-1-agent-1",
+			LastWork: time.Now().Add(-time.Minute).Unix(),
+		}, true)
 		assert.NoError(t, err)
 		assert.True(t, idle)
 	})
@@ -1321,6 +1338,62 @@ func Test_drainOutdatedAgents(t *testing.T) {
 		provider.AssertNumberOfCalls(t, "DeployAgent", 1)
 		assert.Equal(t, []string{"deploy", "remove", "remove"}, events)
 	})
+
+	t.Run("rollout at MaxAgents waits for busy agent then replaces it", func(t *testing.T) {
+		ctx := t.Context()
+		client := mocks_server.NewMockClient(t)
+		provider := &outdatedAgentTestProvider{
+			MockProvider: mocks_provider.NewMockProvider(t),
+			names:        []string{"pool-1-agent-old"},
+		}
+		now := time.Now().Unix()
+		page := func(n int) woodpecker.AgentListOptions {
+			return woodpecker.AgentListOptions{ListOptions: woodpecker.ListOptions{Page: n}}
+		}
+		old := func(noSchedule bool) []*woodpecker.Agent {
+			return []*woodpecker.Agent{{ID: 1, Name: "pool-1-agent-old", LastContact: now, LastWork: now, NoSchedule: noSchedule}}
+		}
+		client.On("AgentListWithOpts", page(1)).Return(old(false), nil).Once()
+		client.On("AgentListWithOpts", page(1)).Return(old(true), nil).Once()
+		client.On("AgentListWithOpts", page(1)).Return([]*woodpecker.Agent{}, nil).Once()
+		client.On("AgentListWithOpts", page(2)).Return([]*woodpecker.Agent{}, nil)
+		client.On("AgentUpdate", mock.Anything).Return(nil, nil).Once()
+		client.On("QueueInfo").Return(&woodpecker.Info{}, nil)
+		client.On("AgentTasksList", int64(1)).Return([]*woodpecker.Task{{ID: "1"}}, nil).Once()
+		client.On("AgentTasksList", int64(1)).Return([]*woodpecker.Task{}, nil).Once()
+		provider.On("ListDeployedAgentNames", ctx).Return([]string{"pool-1-agent-old"}, nil).Twice()
+		provider.On("RemoveAgent", ctx, mock.Anything).Return(nil).Once()
+		client.On("AgentDelete", int64(1)).Return(nil).Once()
+		autoscaler := Autoscaler{
+			provider:      provider,
+			client:        client,
+			danglingSince: map[string]time.Time{},
+			config: &config.Config{
+				PoolID:                 "1",
+				MinAgents:              1,
+				MaxAgents:              1,
+				WorkflowsPerAgent:      1,
+				AgentIdleTimeout:       time.Hour,
+				AgentInactivityTimeout: time.Hour,
+			},
+		}
+
+		// Busy outdated agent holds the only slot: no replacement yet.
+		require.NoError(t, autoscaler.Reconcile(ctx))
+		client.AssertNotCalled(t, "AgentCreate", mock.Anything)
+
+		// Its task finished but LastWork is recent: still retired at once.
+		require.NoError(t, autoscaler.Reconcile(ctx))
+		provider.AssertNumberOfCalls(t, "RemoveAgent", 1)
+		client.AssertNotCalled(t, "AgentCreate", mock.Anything)
+
+		// The freed slot is filled on the next pass.
+		client.On("AgentCreate", mock.Anything).Return(&woodpecker.Agent{ID: 2, Name: "pool-1-agent-new", Created: now}, nil).Once()
+		provider.On("DeployAgent", ctx, mock.Anything).Return(nil).Once()
+		provider.On("ListDeployedAgentNames", ctx).Return([]string{"pool-1-agent-new"}, nil).Once()
+		require.NoError(t, autoscaler.Reconcile(ctx))
+		provider.AssertNumberOfCalls(t, "DeployAgent", 1)
+	})
 }
 
 func Test_removeDrainedAgents(t *testing.T) {
@@ -1347,7 +1420,7 @@ func Test_removeDrainedAgents(t *testing.T) {
 		})).Return(nil)
 		client.On("AgentDelete", int64(2)).Return(nil)
 
-		err := autoscaler.removeDrainedAgents(ctx)
+		err := autoscaler.removeDrainedAgents(ctx, nil)
 		assert.NoError(t, err)
 	})
 
@@ -1370,7 +1443,7 @@ func Test_removeDrainedAgents(t *testing.T) {
 			{ID: "1"},
 		}, nil)
 
-		err := autoscaler.removeDrainedAgents(ctx)
+		err := autoscaler.removeDrainedAgents(ctx, nil)
 		assert.NoError(t, err)
 	})
 }
@@ -1480,7 +1553,7 @@ func Test_removeDrainedAgents_hourlyRoundUp(t *testing.T) {
 		})).Return(nil)
 		client.On("AgentDelete", int64(2)).Return(nil)
 
-		err := autoscaler.removeDrainedAgents(ctx)
+		err := autoscaler.removeDrainedAgents(ctx, nil)
 		assert.NoError(t, err)
 	})
 
@@ -1498,7 +1571,7 @@ func Test_removeDrainedAgents_hourlyRoundUp(t *testing.T) {
 			config:   cfg(),
 		}
 
-		err := autoscaler.removeDrainedAgents(ctx)
+		err := autoscaler.removeDrainedAgents(ctx, nil)
 		assert.NoError(t, err)
 	})
 }
@@ -1520,7 +1593,7 @@ func Test_isAgentIdle_hourlyRoundUp(t *testing.T) {
 			ID:       1,
 			Name:     "pool-1-agent-1",
 			LastWork: time.Now().Add(-time.Minute).Unix(), // worked one minute ago
-		})
+		}, false)
 		assert.NoError(t, err)
 		assert.True(t, idle)
 	})
@@ -1534,7 +1607,7 @@ func Test_isAgentIdle_hourlyRoundUp(t *testing.T) {
 
 		client.On("AgentTasksList", int64(1)).Return([]*woodpecker.Task{{ID: "1"}}, nil)
 
-		idle, err := autoscaler.isAgentIdle(&woodpecker.Agent{ID: 1, Name: "pool-1-agent-1"})
+		idle, err := autoscaler.isAgentIdle(&woodpecker.Agent{ID: 1, Name: "pool-1-agent-1"}, false)
 		assert.NoError(t, err)
 		assert.False(t, idle)
 	})

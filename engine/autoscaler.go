@@ -147,6 +147,7 @@ func (a *Autoscaler) createAgents(ctx context.Context, amount int, outdated map[
 	// Drained outdated agents may still be busy; their pods count against MaxAgents
 	// until removed, so a rollout replaces them gradually instead of surging.
 	toCreate := min(amount-reactivatedAgents, a.config.MaxAgents-len(a.agents))
+	log.Debug().Msgf("starting %d additional agents", max(toCreate, 0))
 	for i := 0; i < toCreate; i++ {
 		agent, err := a.client.AgentCreate(&woodpecker.Agent{
 			Name: fmt.Sprintf("pool-%s-agent-%s", a.config.PoolID, utils.RandomString(suffixLength)),
@@ -238,7 +239,7 @@ func (a *Autoscaler) drainOutdatedAgents(outdated map[string]struct{}) error {
 	return nil
 }
 
-func (a *Autoscaler) isAgentIdle(agent *woodpecker.Agent) (bool, error) {
+func (a *Autoscaler) isAgentIdle(agent *woodpecker.Agent, outdated bool) (bool, error) {
 	tasks, err := a.client.AgentTasksList(agent.ID)
 	if err != nil {
 		return false, fmt.Errorf("client.AgentTasksList: %w", err)
@@ -252,7 +253,8 @@ func (a *Autoscaler) isAgentIdle(agent *woodpecker.Agent) (bool, error) {
 	// hourly-round-up: recency of work does not gate removal. The paid hour is
 	// kept warm by the drain stage; once an agent is eligible for removal the
 	// only thing that protects it is an in-flight task (checked above).
-	if a.config.BillingModel == types.BillingHourlyRoundUp {
+	// An outdated agent is never reused, so keeping it warm only delays its replacement.
+	if outdated || a.config.BillingModel == types.BillingHourlyRoundUp {
 		return true, nil
 	}
 
@@ -264,8 +266,8 @@ func (a *Autoscaler) isAgentIdle(agent *woodpecker.Agent) (bool, error) {
 	return true, nil
 }
 
-func (a *Autoscaler) removeAgent(ctx context.Context, agent *woodpecker.Agent, reason string) error {
-	isIdle, err := a.isAgentIdle(agent)
+func (a *Autoscaler) removeAgent(ctx context.Context, agent *woodpecker.Agent, outdated bool, reason string) error {
+	isIdle, err := a.isAgentIdle(agent, outdated)
 	if err != nil {
 		return err
 	}
@@ -297,7 +299,7 @@ func (a *Autoscaler) removeAgent(ctx context.Context, agent *woodpecker.Agent, r
 	return nil
 }
 
-func (a *Autoscaler) removeDrainedAgents(ctx context.Context) error {
+func (a *Autoscaler) removeDrainedAgents(ctx context.Context, outdated map[string]struct{}) error {
 	for _, agent := range a.getPoolAgents(false) {
 		if !agent.NoSchedule {
 			continue
@@ -310,7 +312,8 @@ func (a *Autoscaler) removeDrainedAgents(ctx context.Context) error {
 			continue
 		}
 
-		err := a.removeAgent(ctx, agent, "was drained")
+		_, isOutdated := outdated[agent.Name]
+		err := a.removeAgent(ctx, agent, isOutdated, "was drained")
 		if err != nil {
 			return err
 		}
@@ -441,7 +444,7 @@ func (a *Autoscaler) cleanupStaleAgents(ctx context.Context) error {
 		}
 
 		if time.Since(time.Unix(lastContact, 0)) > a.config.AgentInactivityTimeout {
-			err := a.removeAgent(ctx, agent, "hasn't connected to the server for a while")
+			err := a.removeAgent(ctx, agent, false, "hasn't connected to the server for a while")
 			if err != nil {
 				return err
 			}
@@ -628,7 +631,6 @@ func (a *Autoscaler) Reconcile(ctx context.Context) error {
 
 	if reqPoolAgents > 0 {
 		num := int(math.Abs(reqPoolAgents))
-		log.Debug().Msgf("starting %d additional agents", num)
 
 		if err := a.createAgents(ctx, num, outdated); err != nil {
 			return fmt.Errorf("creating agents failed: %w", err)
@@ -655,7 +657,7 @@ func (a *Autoscaler) Reconcile(ctx context.Context) error {
 	}
 
 	// remove agents that are drained
-	if err := a.removeDrainedAgents(ctx); err != nil {
+	if err := a.removeDrainedAgents(ctx, outdated); err != nil {
 		return fmt.Errorf("removing drained agents failed: %w", err)
 	}
 
