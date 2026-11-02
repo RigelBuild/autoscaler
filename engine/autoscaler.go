@@ -144,8 +144,10 @@ func (a *Autoscaler) createAgents(ctx context.Context, amount int, outdated map[
 		}
 	}
 
-	// create new agents
-	for i := 0; i < amount-reactivatedAgents; i++ {
+	// Drained outdated agents may still be busy; their pods count against MaxAgents
+	// until removed, so a rollout replaces them gradually instead of surging.
+	toCreate := min(amount-reactivatedAgents, a.config.MaxAgents-len(a.agents))
+	for i := 0; i < toCreate; i++ {
 		agent, err := a.client.AgentCreate(&woodpecker.Agent{
 			Name: fmt.Sprintf("pool-%s-agent-%s", a.config.PoolID, utils.RandomString(suffixLength)),
 		})
