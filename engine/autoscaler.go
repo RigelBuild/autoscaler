@@ -223,7 +223,7 @@ func (a *Autoscaler) outdatedAgentNames(ctx context.Context) (map[string]struct{
 
 func (a *Autoscaler) drainOutdatedAgents(outdated map[string]struct{}) error {
 	for _, agent := range a.getPoolAgents(false) {
-		if _, ok := outdated[agent.Name]; !ok || agent.NoSchedule || agent.LastContact == 0 {
+		if _, ok := outdated[agent.Name]; !ok || agent.NoSchedule {
 			continue
 		}
 
@@ -613,6 +613,11 @@ func (a *Autoscaler) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listing outdated agents failed: %w", err)
 	}
+	// Drain before planning so outdated agents count as unavailable: replacements
+	// are deployed and scale-down only picks current agents.
+	if err := a.drainOutdatedAgents(outdated); err != nil {
+		return fmt.Errorf("draining outdated agents failed: %w", err)
+	}
 
 	reqPoolAgents, err := a.calcAgents(ctx)
 	if err != nil {
@@ -635,9 +640,6 @@ func (a *Autoscaler) Reconcile(ctx context.Context) error {
 		if err := a.drainAgents(ctx, num); err != nil {
 			return fmt.Errorf("draining agents failed: %w", err)
 		}
-	}
-	if err := a.drainOutdatedAgents(outdated); err != nil {
-		return fmt.Errorf("draining outdated agents failed: %w", err)
 	}
 
 	// cleanup agents that are only present at the provider or woodpecker
