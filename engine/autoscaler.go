@@ -144,8 +144,8 @@ func (a *Autoscaler) createAgents(ctx context.Context, amount int, outdated map[
 		}
 	}
 
-	// Drained outdated agents may still be busy; their pods count against MaxAgents
-	// until removed, so a rollout replaces them gradually instead of surging.
+	// Drained outdated agents may still be busy; every pool agent row counts against
+	// MaxAgents until removed, so a rollout replaces them gradually instead of surging.
 	toCreate := min(amount-reactivatedAgents, a.config.MaxAgents-len(a.agents))
 	log.Debug().Msgf("starting %d additional agents", max(toCreate, 0))
 	for i := 0; i < toCreate; i++ {
