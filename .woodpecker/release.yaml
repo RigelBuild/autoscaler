@@ -1,9 +1,3 @@
-# buildx needs a Docker daemon and privileged mode, so pin to the Linux
-# docker backend (not macOS local, not kubernetes).
-labels:
-  os: linux
-  backend: docker
-
 when:
   - event: [pull_request, tag]
   - event: push
@@ -13,8 +7,7 @@ when:
     evaluate: 'CI_COMMIT_PULL_REQUEST_LABELS contains "build_pr_images"'
 
 variables:
-  # The server runs only this exact tag as privileged; a bump must move its allowlist first.
-  - &buildx_plugin 'docker.io/woodpeckerci/plugin-docker-buildx:6.1.0'
+  - &buildx_plugin 'docker.io/woodpeckerci/plugin-docker-buildx:6.1.2'
   - &buildx_settings
     buildkit_oci_max_parallelism: 1
     dockerfile: docker/Dockerfile
@@ -72,6 +65,3 @@ steps:
         from_secret: docker_password
     when:
       event: tag
-      # Rigel tags publish to GHCR from .github/workflows/publish-image.yaml.
-      ref:
-        exclude: refs/tags/v*-rigel.*

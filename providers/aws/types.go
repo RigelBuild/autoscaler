@@ -16,9 +16,11 @@ var (
 	ErrInstanceTypeArchitecture  = errors.New("instance type must report exactly one architecture")
 	ErrTypeNotInRegion           = errors.New("instance type not offered in region")
 	ErrNoDeployCandidates        = errors.New("no deploy candidates resolved")
+	ErrLaunchTemplateMultiRegion = errors.New("aws-launch-template-id requires all instance types in one region")
+	ErrNoMatchingCandidate       = errors.New("no deploy candidate matches requested capability")
+	ErrUnknownArchitecture       = errors.New("unknown architecture")
 	ErrRegionNotSet              = errors.New("aws-region must be set for unqualified values")
 	ErrReservedTagPrefix         = errors.New("reserved tag prefix")
-	ErrLaunchTemplateMultiRegion = errors.New("aws-launch-template-id requires all instance types in one region")
 )
 
 // regionConfig contains the resources that exist together in an AWS region.

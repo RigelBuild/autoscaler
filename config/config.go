@@ -17,8 +17,14 @@ type Config struct {
 	GRPCSecure             bool
 	AgentInactivityTimeout time.Duration
 	AgentIdleTimeout       time.Duration
-	UserData               string // cloudinit template
-	ExtraAgentLabels       map[string]string
+	// AgentCreationTimeout is how long a deployed agent may take to make its
+	// first contact with the server. Past this deadline it no longer counts
+	// as bucket capacity and is reaped, so a stuck boot cannot stall the
+	// queue indefinitely. Zero disables the deadline; never-connected agents
+	// then fall back to AgentInactivityTimeout for reaping.
+	AgentCreationTimeout time.Duration
+	UserData             string // cloudinit template
+	ExtraAgentLabels     map[string]string
 	// PoolPlatform is the Woodpecker `platform` label the pool's agents will
 	// self-report — the fused os/arch string (e.g. "linux/arm64"). A real
 	// agent stamps this itself at registration; the modeled pool filter has no
