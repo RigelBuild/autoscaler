@@ -159,5 +159,6 @@ jobs:
           if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" >/dev/null 2>&1; then
             echo "GitHub Release ${tag} already exists"
           else
-            gh release create "$tag" --verify-tag --generate-notes
+            # release-binaries.yaml may create the same release; reuse it on a lost race.
+            gh release create "$tag" --verify-tag --generate-notes || gh release view "$tag" >/dev/null
           fi

@@ -97,6 +97,12 @@ How idle agents are torn down depends on how the selected provider bills:
 
 The billing model is selected automatically by the provider, so no extra configuration is required to benefit from this.
 
+## Release binaries
+
+Each `v<X.Y.Z>-rigel.<N>` tag publishes `woodpecker-autoscaler_<version>_<os>-<arch>` for `darwin-arm64`, `linux-amd64` and `linux-arm64`, plus `SHA256SUMS`, to the GitHub Release. Assets are never replaced, so a pinned hash stays valid.
+
+`nix build .#woodpecker-autoscaler` fetches the release asset for the current system. It never compiles from source. The hashes live in `nix/versions/autoscaler.nix`; they stay `lib.fakeHash` until the first release with assets, so the build fails closed until they are refreshed.
+
 ## Roadmap
 
 - [ ] Add support for multiple providers

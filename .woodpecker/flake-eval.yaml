@@ -1,0 +1,31 @@
+# Evaluates the flake package for every release platform, then dry-runs the
+# x86_64-linux build. A dry run only plans. The package only fetches a release
+# asset, so any Go derivation in the plan means something compiles from source.
+labels:
+  os: linux
+  backend: docker
+
+when:
+  - event: pull_request
+    path: &when_path
+      - '.woodpecker/flake-eval.yaml'
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'nix/**'
+      - '.github/rigel-version'
+  - event: push
+    branch: ['${CI_REPO_DEFAULT_BRANCH}', rigel-release]
+    path: *when_path
+
+steps:
+  eval-and-plan:
+    image: docker.io/nixos/nix:2.35.2
+    environment:
+      NIX_CONFIG: 'experimental-features = nix-command flakes'
+    commands:
+      - nix eval --raw '.#packages.x86_64-linux.default.drvPath' >/dev/null
+      - nix eval --raw '.#packages.aarch64-linux.default.drvPath' >/dev/null
+      - nix eval --raw '.#packages.aarch64-darwin.default.drvPath' >/dev/null
+      - nix build --dry-run --no-link '.#packages.x86_64-linux.default' 2>plan.log
+      - cat plan.log
+      - if grep -E -- '-go-[0-9]|-go-modules|-vendor' plan.log; then echo 'flake plan would compile Go; expected a release fetch only' >&2; exit 1; fi

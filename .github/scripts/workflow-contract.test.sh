@@ -87,3 +87,27 @@ while IFS= read -r line; do
   [[ "$line" =~ uses:[[:space:]]+[^[:space:]#]+@[0-9a-f]{40}[[:space:]]+#\ v[^[:space:]]+[[:space:]]*$ ]] || fail "third-party action is not SHA-pinned with a version trailer: $line"
 done < <(grep -h 'uses:' "$publisher" "$release")
 pass 'release-tagging Requirement 1 static contract and SHA-pinned actions'
+
+binaries="$root/.github/workflows/release-binaries.yaml"
+[ -f "$binaries" ] || fail 'release-binaries.yaml exists'
+expect 'binaries trigger is version tags' "$(yq -r '.on.push.tags[0]' "$binaries")" 'v*.*.*-rigel.*'
+expect 'binaries workflow token is read only' "$(yq -r '.permissions | keys | join(",")' "$binaries")" contents
+expect 'binaries publish alone gets contents write' "$(yq -r '.jobs.publish.permissions.contents' "$binaries")" write
+expect 'binaries build has no write token' "$(yq -r '.jobs.build.permissions // "read"' "$binaries")" read
+expect 'binaries build matrix is three platforms' "$(yq -r '.jobs.build.strategy.matrix.include | length' "$binaries")" 3
+expect 'binaries never clobber published assets' "$(grep -c -- '--clobber' "$binaries" || true)" 0
+expect 'binaries tolerate an existing release' "$(grep -F -c 'gh release view "$TAG"' "$binaries")" 1
+expect 'publisher tolerates a binaries-created release' "$(grep -F -c 'gh release view "$tag"' "$publisher")" 1
+while IFS= read -r line; do
+  [[ "$line" =~ uses:[[:space:]]+[^[:space:]#]+@[0-9a-f]{40}[[:space:]]+#\ v[^[:space:]]+[[:space:]]*$ ]] || fail "binaries action is not SHA-pinned with a version trailer: $line"
+done < <(grep -h 'uses:' "$binaries")
+pass 'release-binaries workflow static contract'
+
+# The flake fetches release assets: a pin must be a real hash, or the fetch fails closed.
+pins="$root/nix/versions/autoscaler.nix"
+[ -f "$pins" ] || fail 'release asset pins exist'
+expect 'flake reads version from release source' "$(grep -F -c 'rigel-version' "$root/flake.nix")" 1
+for system in x86_64-linux aarch64-linux aarch64-darwin; do
+  grep -F -q "$system = {" "$pins" || fail "pin for $system exists"
+done
+pass 'release asset pins cover every release platform'
