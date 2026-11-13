@@ -21,6 +21,7 @@ import (
 	"go.woodpecker-ci.org/autoscaler/providers/kubernetes"
 	"go.woodpecker-ci.org/autoscaler/providers/linode"
 	"go.woodpecker-ci.org/autoscaler/providers/openstack"
+	"go.woodpecker-ci.org/autoscaler/providers/oracle"
 	"go.woodpecker-ci.org/autoscaler/providers/scaleway"
 	"go.woodpecker-ci.org/autoscaler/providers/vultr"
 	"go.woodpecker-ci.org/autoscaler/server"
@@ -41,10 +42,12 @@ func setupProvider(ctx context.Context, cmd *cli.Command, config *config.Config)
 		return vultr.New(ctx, cmd, config)
 	case "openstack":
 		return openstack.New(ctx, cmd, config)
-	case "scaleway":
-		return scaleway.New(ctx, cmd, config)
 	case "kubernetes":
 		return kubernetes.New(ctx, cmd, config)
+	case "oracle":
+		return oracle.New(ctx, cmd, config)
+	case "scaleway":
+		return scaleway.New(ctx, cmd, config)
 	case "":
 		return nil, fmt.Errorf("please select a provider")
 	}
@@ -97,14 +100,14 @@ func run(ctx context.Context, cmd *cli.Command) error {
 		PoolPlatform:      cmd.String("pool-platform"),
 	}
 
-	// A platform-keyed task is unmatchable against a pool filter carrying no
-	// platform key, and calcAgents skips unsatisfiable tasks silently — so an
-	// unset value strands that work forever with MIN_AGENTS=0 and no error
-	// anywhere. The opt-out is deliberate (it preserves pre-platform
-	// behavior), so warn rather than fail: a deployment that never uses
-	// platform-keyed selectors is still valid.
+	// The kubernetes provider reports no platform of its own, so its buckets
+	// route on PoolPlatform. Unset, a platform-keyed task matches no bucket and
+	// the planner skips it silently, stranding that work with MIN_AGENTS=0. The
+	// opt-out is deliberate (a pool that never sees platform-keyed selectors is
+	// valid, and tasks without a platform key still scale it), so warn rather
+	// than fail.
 	if config.PoolPlatform == "" {
-		log.Warn().Msg("WOODPECKER_POOL_PLATFORM is unset: no platform label is synthesized for the pool, so platform-keyed tasks will never scale it up")
+		log.Warn().Msg("WOODPECKER_POOL_PLATFORM is unset: the pool advertises no platform label, so platform-keyed tasks will never scale it up (kubernetes provider: every platform-keyed task)")
 	}
 
 	provider, err := setupProvider(ctx, cmd, config)
@@ -113,11 +116,14 @@ func run(ctx context.Context, cmd *cli.Command) error {
 	}
 	config.BillingModel = provider.BillingModel()
 
-	autoscaler := engine.NewAutoscaler(provider, client, config)
-
 	config.AgentInactivityTimeout, err = time.ParseDuration(cmd.String("agent-inactivity-timeout"))
 	if err != nil {
 		return fmt.Errorf("can't parse agent-inactivity-timeout: %w", err)
+	}
+
+	config.AgentCreationTimeout, err = time.ParseDuration(cmd.String("agent-creation-timeout"))
+	if err != nil {
+		return fmt.Errorf("can't parse agent-creation-timeout: %w", err)
 	}
 
 	config.AgentIdleTimeout, err = time.ParseDuration(cmd.String("agent-idle-timeout"))
@@ -135,6 +141,11 @@ func run(ctx context.Context, cmd *cli.Command) error {
 		return fmt.Errorf("can't parse reconciliation-interval: %w", err)
 	}
 	config.ReconciliationInterval = reconciliationInterval
+
+	autoscaler, err := engine.NewAutoscaler(ctx, provider, client, config)
+	if err != nil {
+		return fmt.Errorf("could not create autoscaler: %w", err)
+	}
 
 	if config.BillingModel == types.BillingHourlyRoundUp {
 		log.Info().
@@ -191,6 +202,7 @@ func main() {
 	app.Flags = append(app.Flags, vultr.ProviderFlags...)
 	app.Flags = append(app.Flags, openstack.ProviderFlags...)
 	app.Flags = append(app.Flags, kubernetes.ProviderFlags...)
+	app.Flags = append(app.Flags, oracle.ProviderFlags...)
 
 	if err := app.Run(context.Background(), os.Args); err != nil {
 		log.Error().Err(err).Msg("got error while try to run autoscaler")

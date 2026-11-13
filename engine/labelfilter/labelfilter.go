@@ -54,7 +54,7 @@ const synthesizedLabels = 3
 // Not modeled: admin-set server-side agent filters (model.Agent.Filters), which
 // woodpecker-go does not expose. An agent with filters may be counted as able to
 // absorb tasks it would reject, under-provisioning the pool.
-const transliteratedFromVersion = "v3.18.2-0.20261004092618-0002083b83d8"
+const transliteratedFromVersion = "v3.19.0"
 
 // Filter is the effective label set an agent advertises to the scheduler: its
 // configured/custom labels plus the server/agent-stamped defaults (repo="*",

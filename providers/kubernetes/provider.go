@@ -113,7 +113,24 @@ func loadPodTemplate(path string) (corev1.Pod, error) {
 	return podTemplate, nil
 }
 
-func (p *provider) DeployAgent(ctx context.Context, agent *woodpecker.Agent) error {
+// Capabilities reports the one backend this pool serves. Platform is left
+// empty ("unknown, accepts any agent"): the agent pod's own node can differ
+// from the step pods' node (the arm64 pool runs its agent on amd64 and its
+// steps on arm64), so the platform the agent self-reports is not the pool's
+// routing platform. The engine renders the routing platform from
+// config.PoolPlatform into the bucket labels instead.
+func (p *provider) Capabilities(_ context.Context) ([]types.Capability, error) {
+	return []types.Capability{{Backend: types.BackendKubernetes}}, nil
+}
+
+// DeployAgent creates the agent pod for the given capability. The provider only
+// serves the capability it reported; any other pair is refused, so the engine
+// never counts a substitute against the demand it was planning for.
+func (p *provider) DeployAgent(ctx context.Context, agent *woodpecker.Agent, capability types.Capability) error {
+	if capability.Backend != types.BackendKubernetes || capability.Platform != "" {
+		return fmt.Errorf("kubernetes: unsupported capability platform=%s backend=%s", capability.Platform, capability.Backend)
+	}
+
 	name := podName(agent.Name, agent.ID)
 	pod := p.agentPod(name, agent.Name)
 	pod.Annotations[templateHashAnnotation] = p.templateHash
