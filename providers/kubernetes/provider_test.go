@@ -12,12 +12,13 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	ktesting "k8s.io/client-go/testing"
 
 	"go.woodpecker-ci.org/autoscaler/config"
 	"go.woodpecker-ci.org/autoscaler/engine"
+	"go.woodpecker-ci.org/autoscaler/engine/types"
 	"go.woodpecker-ci.org/woodpecker/v3/woodpecker-go/woodpecker"
 )
 
@@ -56,7 +57,7 @@ func TestDeployAgent(t *testing.T) {
 				return false, nil, nil
 			})
 			agent := &woodpecker.Agent{ID: 42, Name: "pool-7-agent-aBcXYZ", Token: "secret-token"}
-			require.NoError(t, p.DeployAgent(t.Context(), agent))
+			require.NoError(t, p.DeployAgent(t.Context(), agent, testCapability))
 			assert.Equal(t, []string{"create:pods", "create:secrets"}, actionSummaries(client.Actions()))
 
 			pod, err := client.CoreV1().Pods(testNamespace).Get(t.Context(), "pool-7-agent-abcxyz-42", metav1.GetOptions{})
@@ -103,7 +104,7 @@ func TestDeployAgent(t *testing.T) {
 			assert.Equal(t, []byte(agent.Token), secret.Data[woodpeckerAgentSecret])
 			assert.Empty(t, secret.Annotations)
 			require.Len(t, secret.OwnerReferences, 1)
-			assert.Equal(t, types.UID("fixed-pod-uid"), pod.UID)
+			assert.Equal(t, k8stypes.UID("fixed-pod-uid"), pod.UID)
 			assert.Equal(t, pod.UID, secret.OwnerReferences[0].UID)
 			assert.Equal(t, pod.Name, secret.OwnerReferences[0].Name)
 			require.NotNil(t, secret.OwnerReferences[0].Controller)
@@ -118,7 +119,7 @@ func TestDeployAgentEnvIsDeterministic(t *testing.T) {
 	cfg.ExtraAgentLabels = map[string]string{"os": "linux", "cloud": "azure", "lifecycle": "spot"}
 	p, client := newTestProvider(t, "custom-agent:v1", cfg)
 	for id := int64(1); id <= 20; id++ {
-		require.NoError(t, p.DeployAgent(t.Context(), &woodpecker.Agent{ID: id, Name: "pool-7-agent-x", Token: "t"}))
+		require.NoError(t, p.DeployAgent(t.Context(), &woodpecker.Agent{ID: id, Name: "pool-7-agent-x", Token: "t"}, testCapability))
 		pod, err := client.CoreV1().Pods(testNamespace).Get(t.Context(), podName("pool-7-agent-x", id), metav1.GetOptions{})
 		require.NoError(t, err)
 		names := make([]string, 0, len(pod.Spec.Containers[0].Env))
@@ -148,7 +149,7 @@ func TestDeployAgentPodCreateFailureDoesNotCreateSecret(t *testing.T) {
 		return true, nil, errors.New("pod create rejected")
 	})
 
-	err := p.DeployAgent(t.Context(), &woodpecker.Agent{ID: 9, Name: "pool-7-agent-ABC", Token: "token"})
+	err := p.DeployAgent(t.Context(), &woodpecker.Agent{ID: 9, Name: "pool-7-agent-ABC", Token: "token"}, testCapability)
 	require.Error(t, err)
 	assert.Zero(t, secretReadsOrDeletes)
 	assert.Equal(t, []string{"create:pods"}, actionSummaries(client.Actions()))
@@ -160,7 +161,7 @@ func TestDeployAgentSecretCreateFailureDeletesPod(t *testing.T) {
 		return true, nil, errors.New("secret create rejected")
 	})
 
-	err := p.DeployAgent(t.Context(), &woodpecker.Agent{ID: 9, Name: "pool-7-agent-ABC", Token: "token"})
+	err := p.DeployAgent(t.Context(), &woodpecker.Agent{ID: 9, Name: "pool-7-agent-ABC", Token: "token"}, testCapability)
 	require.Error(t, err)
 	_, err = client.CoreV1().Pods(testNamespace).Get(t.Context(), "pool-7-agent-abc-9", metav1.GetOptions{})
 	assert.True(t, apierrors.IsNotFound(err))
@@ -169,7 +170,7 @@ func TestDeployAgentSecretCreateFailureDeletesPod(t *testing.T) {
 func TestRemoveAgent(t *testing.T) {
 	p, client := newTestProvider(t, "", testConfig())
 	agent := &woodpecker.Agent{ID: 12, Name: "pool-7-agent-AbC", Token: "token"}
-	require.NoError(t, p.DeployAgent(t.Context(), agent))
+	require.NoError(t, p.DeployAgent(t.Context(), agent, testCapability))
 	require.NoError(t, p.RemoveAgent(t.Context(), agent))
 	require.NoError(t, p.RemoveAgent(t.Context(), agent))
 
@@ -415,6 +416,22 @@ func actionSummaries(actions []ktesting.Action) []string {
 	return summaries
 }
 
+// testCapability is the one capability the test pool reports: the kubernetes
+// backend with an unknown platform, so DeployAgent accepts it.
+var testCapability = types.Capability{Backend: types.BackendKubernetes}
+
+func TestCapabilitiesLeavePlatformUnknown(t *testing.T) {
+	cfg := testConfig()
+	cfg.PoolPlatform = "linux/arm64"
+	p, _ := newTestProvider(t, "", cfg)
+	caps, err := p.Capabilities(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, []types.Capability{testCapability}, caps,
+		"the agent pod's self-reported platform is not the pool's routing platform")
+	assert.Error(t, p.DeployAgent(t.Context(), &woodpecker.Agent{ID: 1, Name: "pool-7-agent-x"},
+		types.Capability{Platform: "linux/arm64", Backend: types.BackendKubernetes}))
+}
+
 func testConfig() *config.Config {
 	return &config.Config{
 		PoolID:            testPoolID,
@@ -423,6 +440,7 @@ func testConfig() *config.Config {
 		GRPCAddress:       "woodpecker-server:9000",
 		Environment:       map[string]string{"CUSTOM_ENV": "value"},
 		ExtraAgentLabels:  map[string]string{"team": "ci"},
+		PoolPlatform:      "linux/amd64",
 	}
 }
 

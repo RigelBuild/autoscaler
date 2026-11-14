@@ -1,15 +1,10 @@
-# Pin to Linux: unlabeled workflows can land on the macOS agents, whose
-# local backend cannot run container images.
-labels:
-  os: linux
-
 when:
   event: push
   branch: ${CI_REPO_DEFAULT_BRANCH}
 
 steps:
   - name: release
-    image: docker.io/woodpeckerci/plugin-ready-release-go:4.1.2
+    image: docker.io/woodpeckerci/plugin-ready-release-go:4.1.3
     pull: true
     settings:
       git_email: woodpecker-bot@obermui.de

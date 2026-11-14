@@ -3,7 +3,9 @@ package aws
 import (
 	"context"
 	b64 "encoding/base64"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -187,7 +189,29 @@ func (p *provider) printResolvedConfig() {
 	}
 }
 
-func (p *provider) DeployAgent(ctx context.Context, agent *woodpecker.Agent) error {
+func (p *provider) DeployAgent(ctx context.Context, agent *woodpecker.Agent, capability types.Capability) error {
+	// Filter to the candidates that can serve the requested capability;
+	// the capacity failover below only iterates within this set. Candidates
+	// with an unknown architecture were not advertised and remain unusable,
+	// but must not block known candidates.
+	candidates := make([]deployCandidate, 0, len(p.deployCandidates))
+	if capability.Backend == types.BackendDocker {
+		for _, c := range p.deployCandidates {
+			platform, err := candidatePlatform(c)
+			if err != nil {
+				log.Error().Err(err).Msg("skipping deploy candidate with unknown architecture")
+				continue
+			}
+			if platform == capability.Platform {
+				candidates = append(candidates, c)
+			}
+		}
+	}
+	if len(candidates) == 0 {
+		return fmt.Errorf("%s: %w: platform=%s backend=%s",
+			p.name, ErrNoMatchingCandidate, capability.Platform, capability.Backend)
+	}
+
 	userData, err := cloudinit.RenderUserDataTemplate(p.config, agent, cloudinit.RenderOption{
 		PreExec: blackholeMetadataAPI,
 	})
@@ -223,14 +247,6 @@ func (p *provider) DeployAgent(ctx context.Context, agent *woodpecker.Agent) err
 		tags = append(tags, rt)
 	}
 
-	encodedUserData := aws.String(b64.StdEncoding.EncodeToString([]byte(userData)))
-
-	// A launch template anchors the CreateFleet path, which lets AWS choose
-	// across every candidate type and subnet in one call.
-	if p.launchTemplateID != "" {
-		return p.deployFleet(ctx, agent, encodedUserData, tags)
-	}
-
 	runInstancesInput := ec2.RunInstancesInput{
 		IamInstanceProfile: &ec2_types.IamInstanceProfileSpecification{
 			Arn: aws.String(p.iamInstanceProfileArn),
@@ -264,10 +280,20 @@ func (p *provider) DeployAgent(ctx context.Context, agent *woodpecker.Agent) err
 		runInstancesInput.KeyName = aws.String(p.sshKeyName)
 	}
 
+	encodedUserData := aws.String(b64.StdEncoding.EncodeToString([]byte(userData)))
+
+	// A launch template anchors the CreateFleet path, which lets AWS choose
+	// across every candidate type and subnet in one call. It is scoped to the
+	// capability-filtered candidates, so it never deploys a pair the caller did
+	// not ask for.
+	if p.launchTemplateID != "" {
+		return p.deployFleet(ctx, agent, candidates, encodedUserData, tags)
+	}
+
 	runInstancesInput.UserData = encodedUserData
 
 	var result *ec2.RunInstancesOutput
-	for i, c := range p.deployCandidates {
+	for i, c := range candidates {
 		runInstancesInput.InstanceType = c.instanceType.InstanceType
 		runInstancesInput.ImageId = c.regionConfig.image.ImageId
 		runInstancesInput.SecurityGroupIds = c.regionConfig.securityGroups
@@ -294,7 +320,7 @@ func (p *provider) DeployAgent(ctx context.Context, agent *woodpecker.Agent) err
 		}
 
 		// Only log and continue if there are more candidates left.
-		if i < len(p.deployCandidates)-1 {
+		if i < len(candidates)-1 {
 			log.Warn().Msgf(
 				"create agent failed: type = %s region = %s: %s",
 				c.instanceType.InstanceType, c.regionConfig.region, err,
@@ -304,7 +330,7 @@ func (p *provider) DeployAgent(ctx context.Context, agent *woodpecker.Agent) err
 
 		// Last candidate failed: the whole fallback chain is exhausted.
 		return fmt.Errorf("%s: all %d deploy candidates out of capacity, last: RunInstances: %w",
-			p.name, len(p.deployCandidates), err)
+			p.name, len(candidates), err)
 	}
 
 	if result == nil || len(result.Instances) == 0 {
@@ -314,9 +340,11 @@ func (p *provider) DeployAgent(ctx context.Context, agent *woodpecker.Agent) err
 	return p.waitForAgent(ctx, agent, *result.Instances[0].InstanceId)
 }
 
-func (p *provider) deployFleet(ctx context.Context, agent *woodpecker.Agent, encodedUserData *string, tags []ec2_types.Tag) error {
-	// IMDSv2-required metadata options in the Fleet request shape, shared
-	// read-only across every override.
+// deployFleet launches the agent through one CreateFleet call across every
+// candidate instance type and subnet of a single region. The launch template
+// supplies the security groups, which an instant fleet cannot override per
+// override. It is only reached with the capability-filtered candidates.
+func (p *provider) deployFleet(ctx context.Context, agent *woodpecker.Agent, candidates []deployCandidate, encodedUserData *string, tags []ec2_types.Tag) error {
 	metadataOptions := &ec2_types.FleetInstanceMetadataOptionsRequest{
 		HttpEndpoint:            ec2_types.FleetInstanceMetadataEndpointStateEnabled,
 		HttpPutResponseHopLimit: aws.Int32(1),
@@ -324,10 +352,9 @@ func (p *provider) deployFleet(ctx context.Context, agent *woodpecker.Agent, enc
 	}
 
 	// Full cross-product of candidates x their subnets, replacing the subnet
-	// round-robin. Security groups have no override field on an instant fleet;
-	// they come from the launch template.
-	overrides := make([]ec2_types.FleetLaunchTemplateOverridesRequest, 0, len(p.deployCandidates))
-	for _, c := range p.deployCandidates {
+	// round-robin.
+	overrides := make([]ec2_types.FleetLaunchTemplateOverridesRequest, 0, len(candidates))
+	for _, c := range candidates {
 		for _, subnet := range c.regionConfig.subnets {
 			override := ec2_types.FleetLaunchTemplateOverridesRequest{
 				InstanceType: c.instanceType.InstanceType,
@@ -370,14 +397,8 @@ func (p *provider) deployFleet(ctx context.Context, agent *woodpecker.Agent, enc
 			},
 		},
 		TagSpecifications: []ec2_types.TagSpecification{
-			{
-				ResourceType: "instance",
-				Tags:         tags,
-			},
-			{
-				ResourceType: "volume",
-				Tags:         tags,
-			},
+			{ResourceType: "instance", Tags: tags},
+			{ResourceType: "volume", Tags: tags},
 		},
 	}
 
@@ -388,7 +409,7 @@ func (p *provider) deployFleet(ctx context.Context, agent *woodpecker.Agent, enc
 	}
 
 	// New rejects a launch template across regions, so all candidates share one.
-	region := p.deployCandidates[0].regionConfig.region
+	region := candidates[0].regionConfig.region
 	log.Info().
 		Int("overrides", len(overrides)).
 		Str("region", region).
@@ -413,9 +434,9 @@ func (p *provider) deployFleet(ctx context.Context, agent *woodpecker.Agent, enc
 	return p.waitForAgent(ctx, agent, out.Instances[0].InstanceIds[0])
 }
 
+// waitForAgent waits until the launched instance shows up in the pool's agent
+// list. Tag-based listing can lag a second or two behind a successful launch.
 func (p *provider) waitForAgent(ctx context.Context, agent *woodpecker.Agent, instanceID string) error {
-	// Wait until instance is available. Sometimes it can take a second or two for the tag based
-	// filter to show the instance we just created in AWS
 	log.Debug().Msgf("waiting for instance %s", instanceID)
 	for range 5 {
 		agents, err := p.ListDeployedAgentNames(ctx)
@@ -423,10 +444,8 @@ func (p *provider) waitForAgent(ctx context.Context, agent *woodpecker.Agent, in
 			return fmt.Errorf("%s: ListDeployedAgentNames: %w", p.name, err)
 		}
 
-		for _, a := range agents {
-			if a == agent.Name {
-				return nil
-			}
+		if slices.Contains(agents, agent.Name) {
+			return nil
 		}
 
 		log.Debug().Msgf("created agent not found in list yet")
@@ -440,6 +459,9 @@ func (p *provider) RemoveAgent(ctx context.Context, agent *woodpecker.Agent) err
 	instance, region, err := p.getAgent(ctx, agent)
 	if err != nil {
 		return err
+	}
+	if instance == nil {
+		return nil
 	}
 
 	_, err = p.client.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
@@ -470,6 +492,35 @@ func (p *provider) ListDeployedAgentNames(ctx context.Context) ([]string, error)
 		}
 	}
 	return names, nil
+}
+
+func (p *provider) Capabilities(_ context.Context) ([]types.Capability, error) {
+	seen := map[string]bool{}
+	var caps []types.Capability
+	var errs error
+
+	for _, c := range p.deployCandidates {
+		platform, err := candidatePlatform(c)
+		if err != nil {
+			// Discovery must not take the autoscaler down over one candidate
+			// with an architecture the mapping does not know; report it and
+			// keep the remaining candidates usable.
+			log.Error().Err(err).Msg("skipping deploy candidate with unknown architecture")
+			errs = errors.Join(errs, err)
+			continue
+		}
+		if !seen[platform] {
+			seen[platform] = true
+			caps = append(caps, types.Capability{
+				Platform: platform,
+				Backend:  types.BackendDocker,
+			})
+		}
+	}
+	if len(caps) == 0 && errs != nil {
+		return nil, errs
+	}
+	return caps, nil
 }
 
 func (p *provider) BillingModel() types.BillingModel {

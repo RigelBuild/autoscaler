@@ -21,12 +21,13 @@
             buildInputs = [
               gnumake
               go
-              glibc.static
               gofumpt
               golangci-lint
               go-mockery
               addlicense
               gcc
+              hadolint
+              pre-commit
             ];
             CFLAGS = "-I${pkgs.glibc.dev}/include";
             LDFLAGS = "-L${pkgs.glibc}/lib";

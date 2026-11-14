@@ -18,10 +18,19 @@ func NewMockProvider(t interface {
 	mock.TestingT
 	Cleanup(func())
 }) *MockProvider {
+	if helper, ok := t.(interface{ Helper() }); ok {
+		helper.Helper()
+	}
+
 	mock := &MockProvider{}
 	mock.Mock.Test(t)
 
-	t.Cleanup(func() { mock.AssertExpectations(t) })
+	t.Cleanup(func() {
+		if helper, ok := t.(interface{ Helper() }); ok {
+			helper.Helper()
+		}
+		mock.AssertExpectations(t)
+	})
 
 	return mock
 }
@@ -83,17 +92,79 @@ func (_c *MockProvider_BillingModel_Call) RunAndReturn(run func() types.BillingM
 	return _c
 }
 
+// Capabilities provides a mock function for the type MockProvider
+func (_mock *MockProvider) Capabilities(ctx context.Context) ([]types.Capability, error) {
+	ret := _mock.Called(ctx)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Capabilities")
+	}
+
+	var r0 []types.Capability
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context) ([]types.Capability, error)); ok {
+		return returnFunc(ctx)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context) []types.Capability); ok {
+		r0 = returnFunc(ctx)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]types.Capability)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = returnFunc(ctx)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockProvider_Capabilities_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Capabilities'
+type MockProvider_Capabilities_Call struct {
+	*mock.Call
+}
+
+// Capabilities is a helper method to define mock.On call
+//   - ctx context.Context
+func (_e *MockProvider_Expecter) Capabilities(ctx any) *MockProvider_Capabilities_Call {
+	return &MockProvider_Capabilities_Call{Call: _e.mock.On("Capabilities", ctx)}
+}
+
+func (_c *MockProvider_Capabilities_Call) Run(run func(ctx context.Context)) *MockProvider_Capabilities_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockProvider_Capabilities_Call) Return(capabilitys []types.Capability, err error) *MockProvider_Capabilities_Call {
+	_c.Call.Return(capabilitys, err)
+	return _c
+}
+
+func (_c *MockProvider_Capabilities_Call) RunAndReturn(run func(ctx context.Context) ([]types.Capability, error)) *MockProvider_Capabilities_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // DeployAgent provides a mock function for the type MockProvider
-func (_mock *MockProvider) DeployAgent(context1 context.Context, agent *woodpecker.Agent) error {
-	ret := _mock.Called(context1, agent)
+func (_mock *MockProvider) DeployAgent(context1 context.Context, agent *woodpecker.Agent, capability types.Capability) error {
+	ret := _mock.Called(context1, agent, capability)
 
 	if len(ret) == 0 {
 		panic("no return value specified for DeployAgent")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, *woodpecker.Agent) error); ok {
-		r0 = returnFunc(context1, agent)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, *woodpecker.Agent, types.Capability) error); ok {
+		r0 = returnFunc(context1, agent, capability)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -108,11 +179,12 @@ type MockProvider_DeployAgent_Call struct {
 // DeployAgent is a helper method to define mock.On call
 //   - context1 context.Context
 //   - agent *woodpecker.Agent
-func (_e *MockProvider_Expecter) DeployAgent(context1 interface{}, agent interface{}) *MockProvider_DeployAgent_Call {
-	return &MockProvider_DeployAgent_Call{Call: _e.mock.On("DeployAgent", context1, agent)}
+//   - capability types.Capability
+func (_e *MockProvider_Expecter) DeployAgent(context1 any, agent any, capability any) *MockProvider_DeployAgent_Call {
+	return &MockProvider_DeployAgent_Call{Call: _e.mock.On("DeployAgent", context1, agent, capability)}
 }
 
-func (_c *MockProvider_DeployAgent_Call) Run(run func(context1 context.Context, agent *woodpecker.Agent)) *MockProvider_DeployAgent_Call {
+func (_c *MockProvider_DeployAgent_Call) Run(run func(context1 context.Context, agent *woodpecker.Agent, capability types.Capability)) *MockProvider_DeployAgent_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -122,9 +194,14 @@ func (_c *MockProvider_DeployAgent_Call) Run(run func(context1 context.Context, 
 		if args[1] != nil {
 			arg1 = args[1].(*woodpecker.Agent)
 		}
+		var arg2 types.Capability
+		if args[2] != nil {
+			arg2 = args[2].(types.Capability)
+		}
 		run(
 			arg0,
 			arg1,
+			arg2,
 		)
 	})
 	return _c
@@ -135,7 +212,7 @@ func (_c *MockProvider_DeployAgent_Call) Return(err error) *MockProvider_DeployA
 	return _c
 }
 
-func (_c *MockProvider_DeployAgent_Call) RunAndReturn(run func(context1 context.Context, agent *woodpecker.Agent) error) *MockProvider_DeployAgent_Call {
+func (_c *MockProvider_DeployAgent_Call) RunAndReturn(run func(context1 context.Context, agent *woodpecker.Agent, capability types.Capability) error) *MockProvider_DeployAgent_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -175,7 +252,7 @@ type MockProvider_ListDeployedAgentNames_Call struct {
 
 // ListDeployedAgentNames is a helper method to define mock.On call
 //   - context1 context.Context
-func (_e *MockProvider_Expecter) ListDeployedAgentNames(context1 interface{}) *MockProvider_ListDeployedAgentNames_Call {
+func (_e *MockProvider_Expecter) ListDeployedAgentNames(context1 any) *MockProvider_ListDeployedAgentNames_Call {
 	return &MockProvider_ListDeployedAgentNames_Call{Call: _e.mock.On("ListDeployedAgentNames", context1)}
 }
 
@@ -227,7 +304,7 @@ type MockProvider_RemoveAgent_Call struct {
 // RemoveAgent is a helper method to define mock.On call
 //   - context1 context.Context
 //   - agent *woodpecker.Agent
-func (_e *MockProvider_Expecter) RemoveAgent(context1 interface{}, agent interface{}) *MockProvider_RemoveAgent_Call {
+func (_e *MockProvider_Expecter) RemoveAgent(context1 any, agent any) *MockProvider_RemoveAgent_Call {
 	return &MockProvider_RemoveAgent_Call{Call: _e.mock.On("RemoveAgent", context1, agent)}
 }
 
