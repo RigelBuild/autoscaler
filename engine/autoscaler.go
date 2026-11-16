@@ -42,7 +42,7 @@ type Autoscaler struct {
 	// the planner would re-provision the same demand while it boots.
 	pendingDeploys              map[string]types.Capability
 	outdatedDrainAgent          string
-	outdatedDrainExistingAgents map[string]struct{}
+	outdatedDrainExistingAgents map[string]int64
 	outdatedDrainSince          time.Time
 	outdatedDrainWarned         bool
 
@@ -120,7 +120,7 @@ func (a *Autoscaler) Reconcile(ctx context.Context) error {
 		}
 		if !a.outdatedDrainSince.IsZero() && time.Since(a.outdatedDrainSince) > timeout {
 			for _, agent := range a.agents {
-				if _, existed := a.outdatedDrainExistingAgents[agent.Name]; existed || agent.LastContact != 0 {
+				if id, existed := a.outdatedDrainExistingAgents[agent.Name]; (existed && id == agent.ID) || agent.LastContact != 0 {
 					continue
 				}
 				if err := a.removeAgent(ctx, agent, false, "replacement failed to connect"); err != nil {

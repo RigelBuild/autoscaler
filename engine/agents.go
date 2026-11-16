@@ -146,6 +146,11 @@ func (a *Autoscaler) createAgents(ctx context.Context, bucket agentBucket, amoun
 		agent.Backend = string(bucket.Capability.Backend)
 
 		a.agents[agent.Name] = agent
+		if a.outdatedDrainAgent != "" {
+			if _, exists := a.agents[a.outdatedDrainAgent]; !exists {
+				a.outdatedDrainSince = time.Now()
+			}
+		}
 	}
 
 	return nil
@@ -251,8 +256,7 @@ func (a *Autoscaler) outdatedAgentNames(ctx context.Context) (map[string]struct{
 // cleanupStaleAgents reaps replacements after AgentCreationTimeout.
 func (a *Autoscaler) drainOutdatedAgents(outdated map[string]struct{}) error {
 	if a.outdatedDrainAgent != "" {
-		if _, exists := a.agents[a.outdatedDrainAgent]; exists {
-			drained := a.agents[a.outdatedDrainAgent]
+		if drained, exists := a.agents[a.outdatedDrainAgent]; exists && drained.ID == a.outdatedDrainExistingAgents[a.outdatedDrainAgent] {
 			if a.outdatedDrainSince.IsZero() {
 				a.outdatedDrainSince = time.Now()
 			}
@@ -265,7 +269,7 @@ func (a *Autoscaler) drainOutdatedAgents(outdated map[string]struct{}) error {
 		}
 		replacementFound := false
 		for _, agent := range a.agents {
-			if _, isOutdated := outdated[agent.Name]; isOutdated {
+			if _, isOutdated := outdated[agent.Name]; isOutdated && agent.ID == a.outdatedDrainExistingAgents[agent.Name] {
 				continue
 			}
 			_, pendingDeploy := a.pendingDeploys[agent.Name]
@@ -273,10 +277,8 @@ func (a *Autoscaler) drainOutdatedAgents(outdated map[string]struct{}) error {
 				a.warnBootingReplacement(agent)
 				return nil
 			}
-			if a.outdatedDrainExistingAgents != nil {
-				if _, existed := a.outdatedDrainExistingAgents[agent.Name]; existed {
-					continue
-				}
+			if id, existed := a.outdatedDrainExistingAgents[agent.Name]; existed && id == agent.ID {
+				continue
 			}
 			replacementFound = true
 		}
@@ -370,10 +372,10 @@ func (a *Autoscaler) drainOutdatedAgents(outdated map[string]struct{}) error {
 	return nil
 }
 
-func currentAgentNames(agents map[string]*woodpecker.Agent) map[string]struct{} {
-	names := make(map[string]struct{}, len(agents))
-	for name := range agents {
-		names[name] = struct{}{}
+func currentAgentNames(agents map[string]*woodpecker.Agent) map[string]int64 {
+	names := make(map[string]int64, len(agents))
+	for name, agent := range agents {
+		names[name] = agent.ID
 	}
 	return names
 }

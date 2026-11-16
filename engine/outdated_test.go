@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -121,7 +122,7 @@ func Test_drainOutdatedAgents(t *testing.T) {
 			agents:                      agentsByName(replacement),
 			client:                      client,
 			outdatedDrainAgent:          outdated.Name,
-			outdatedDrainExistingAgents: map[string]struct{}{outdated.Name: {}},
+			outdatedDrainExistingAgents: map[string]int64{outdated.Name: outdated.ID},
 			pendingDeploys:              map[string]types.Capability{},
 			config:                      &config.Config{AgentCreationTimeout: time.Minute},
 		}
@@ -138,7 +139,7 @@ func Test_drainOutdatedAgents(t *testing.T) {
 			agents:                      agentsByName(replacement),
 			client:                      client,
 			outdatedDrainAgent:          outdated.Name,
-			outdatedDrainExistingAgents: map[string]struct{}{outdated.Name: {}},
+			outdatedDrainExistingAgents: map[string]int64{outdated.Name: outdated.ID},
 			pendingDeploys: map[string]types.Capability{
 				replacement.Name: dockerAmd64Cap,
 			},
@@ -156,6 +157,7 @@ func Test_drainOutdatedAgents(t *testing.T) {
 			agents:             agentsByName(drained),
 			client:             client,
 			outdatedDrainAgent: drained.Name,
+			outdatedDrainExistingAgents: map[string]int64{drained.Name: drained.ID},
 			outdatedDrainSince: time.Now().Add(-time.Hour),
 			config:             &config.Config{AgentInactivityTimeout: time.Minute},
 		}
@@ -397,16 +399,30 @@ func Test_reconcile_drainsOutdatedAgentsGradually(t *testing.T) {
 }
 
 func Test_reconcile_failedReplacementReleasesDrain(t *testing.T) {
-	client, a := newOutdatedRolloutAutoscaler(t, 4)
-	require.NoError(t, a.Reconcile(t.Context()))
-	failed := a.agents["pool-1-agent-new"]
-	require.NotNil(t, failed)
-	a.config.AgentCreationTimeout = time.Minute
-	a.outdatedDrainSince = time.Now().Add(-2 * time.Minute)
-	require.NoError(t, a.Reconcile(t.Context()))
-	client.AssertCalled(t, "AgentDelete", failed.ID)
-	assert.Equal(t, 2, countMockCalls(client.Calls, "AgentUpdate"))
-	assert.Len(t, a.agents, a.config.MaxAgents)
+	synctest.Test(t, func(t *testing.T) {
+		client, a := newOutdatedRolloutAutoscaler(t, 4)
+		a.config.AgentCreationTimeout = time.Minute
+		require.NoError(t, a.Reconcile(t.Context()))
+		failed := a.agents["pool-1-agent-new"]
+		require.NotNil(t, failed)
+		synctest.Sleep(2 * time.Minute)
+		require.NoError(t, a.Reconcile(t.Context()))
+		client.AssertCalled(t, "AgentDelete", failed.ID)
+		assert.Equal(t, 2, countMockCalls(client.Calls, "AgentUpdate"))
+		assert.Len(t, a.agents, a.config.MaxAgents)
+	})
+}
+
+func Test_drainOutdatedAgents_reusedName(t *testing.T) {
+	client := mocks_server.NewMockClient(t)
+	replacement := &woodpecker.Agent{ID: 2, Name: "pool-1-agent-old", LastContact: time.Now().Unix()}
+	a := Autoscaler{
+		agents: agentsByName(replacement), client: client, config: &config.Config{},
+		outdatedDrainAgent: replacement.Name,
+		outdatedDrainExistingAgents: map[string]int64{replacement.Name: 1},
+	}
+	require.NoError(t, a.drainOutdatedAgents(nil))
+	assert.Empty(t, a.outdatedDrainAgent)
 }
 
 func Test_reconcile_replacesIdleOutdatedAgentAtMaxAgentsOne(t *testing.T) {
