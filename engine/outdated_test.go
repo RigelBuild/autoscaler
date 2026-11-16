@@ -72,6 +72,7 @@ func Test_drainOutdatedAgents(t *testing.T) {
 		aNeverContacted := &woodpecker.Agent{ID: 2, Name: "pool-1-agent-a"}
 		busy := &woodpecker.Agent{ID: 3, Name: "pool-1-agent-busy", LastContact: time.Now().Unix()}
 		a := Autoscaler{agents: agentsByName(busy, zNeverContacted, aNeverContacted), client: client, config: &config.Config{PoolID: "1"}}
+		client.On("AgentTasksList", busy.ID).Return([]*woodpecker.Task{{ID: "running-work"}}, nil).Once()
 		client.On("AgentUpdate", mock.MatchedBy(func(agent *woodpecker.Agent) bool {
 			return agent.ID == aNeverContacted.ID && agent.NoSchedule
 		})).Return(nil, nil).Once()
@@ -189,6 +190,7 @@ func Test_drainOutdatedAgents(t *testing.T) {
 	t.Run("agent update error is returned", func(t *testing.T) {
 		client := mocks_server.NewMockClient(t)
 		client.On("AgentUpdate", mock.Anything).Return(nil, fmt.Errorf("server unavailable"))
+		client.On("AgentTasksList", int64(1)).Return([]*woodpecker.Task{}, nil).Once()
 		autoscaler := Autoscaler{
 			agents: agentsByName(&woodpecker.Agent{
 				ID:          1,
@@ -409,6 +411,7 @@ func Test_reconcile_failedReplacementReleasesDrain(t *testing.T) {
 		require.NoError(t, a.Reconcile(t.Context()))
 		client.AssertCalled(t, "AgentDelete", failed.ID)
 		assert.Equal(t, 2, countMockCalls(client.Calls, "AgentUpdate"))
+		client.AssertNumberOfCalls(t, "AgentCreate", 3)
 		assert.Len(t, a.agents, a.config.MaxAgents)
 	})
 }
@@ -513,9 +516,14 @@ func newOutdatedRolloutAutoscaler(t *testing.T, agentCount int) (*mocks_server.M
 		return agent, nil
 	}).Maybe()
 	client.On("AgentTasksList", mock.Anything).Return([]*woodpecker.Task{}, nil).Maybe()
+	created := 0
 	client.On("AgentCreate", mock.Anything).Return(func(agent *woodpecker.Agent) (*woodpecker.Agent, error) {
-		agent.ID = 99
+		created++
+		agent.ID = int64(98 + created)
 		agent.Name = "pool-1-agent-new"
+		if created > 1 {
+			agent.Name = fmt.Sprintf("pool-1-agent-new-%d", created)
+		}
 		agent.Created = time.Now().Unix()
 		serverAgents[agent.Name] = agent
 		return agent, nil
