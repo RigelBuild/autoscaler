@@ -245,21 +245,29 @@ func (a *Autoscaler) outdatedAgentNames(ctx context.Context) (map[string]struct{
 	return outdated, nil
 }
 
-// drainOutdatedAgents flags every schedulable outdated pool agent NoSchedule so
-// it stops taking work. It drains regardless of idleness: a busy outdated agent
-// finishes its task, and removeDrainedAgents removes it once task-free. Drained
-// outdated agents hold their MaxAgents slot until then, so a rollout replaces
-// them gradually instead of surging.
+// drainOutdatedAgents flags at most one schedulable outdated pool agent
+// NoSchedule per reconcile. It drains regardless of idleness: a busy outdated
+// agent finishes its task, and removeDrainedAgents removes it once task-free.
+// Drained outdated agents hold their MaxAgents slot until then, so another
+// outdated agent is not drained until the first slot is released.
 func (a *Autoscaler) drainOutdatedAgents(outdated map[string]struct{}) error {
+	var candidate *woodpecker.Agent
 	for _, agent := range a.agents {
-		if _, ok := outdated[agent.Name]; !ok || agent.NoSchedule {
+		if _, ok := outdated[agent.Name]; !ok {
 			continue
 		}
-		if err := a.markAgentForDrain(agent); err != nil {
-			return err
+		if agent.NoSchedule {
+			return nil
+		}
+		if candidate == nil {
+			candidate = agent
 		}
 	}
-	return nil
+
+	if candidate == nil {
+		return nil
+	}
+	return a.markAgentForDrain(candidate)
 }
 
 func (a *Autoscaler) isAgentIdle(agent *woodpecker.Agent, outdated bool) (bool, error) {
