@@ -70,8 +70,8 @@ func (a *Autoscaler) replacementBootBound() time.Duration {
 }
 
 func (a *Autoscaler) bootDeadlineExceeded(agent *woodpecker.Agent) bool {
-	bound := a.replacementBootBound()
-	return bound > 0 && time.Since(time.Unix(agent.Created, 0)) > bound
+	return a.config.AgentCreationTimeout > 0 &&
+		time.Since(time.Unix(agent.Created, 0)) > a.config.AgentCreationTimeout
 }
 
 // createAgents deploys `amount` new agents into the given bucket.
@@ -154,6 +154,7 @@ func (a *Autoscaler) createAgents(ctx context.Context, bucket agentBucket, amoun
 		a.agents[agent.Name] = agent
 		if a.outdatedDrainAgent != "" {
 			if _, exists := a.agents[a.outdatedDrainAgent]; !exists {
+				a.outdatedReplacementAttempted = true
 				a.outdatedDrainSince = time.Now()
 			}
 		}
@@ -286,12 +287,14 @@ func (a *Autoscaler) drainOutdatedAgents(outdated map[string]struct{}) error {
 			}
 			replacementFound = true
 		}
-		if !replacementFound {
+		if !replacementFound && a.outdatedReplacementAttempted {
 			return nil
 		}
 		a.outdatedDrainAgent = ""
 		a.outdatedDrainExistingAgents = nil
 		a.outdatedDrainFailures = 0
+		a.outdatedReplacementAttempted = false
+		a.outdatedNoBoundWarned = false
 	}
 
 	var existingDrain *woodpecker.Agent
@@ -446,6 +449,11 @@ func (a *Autoscaler) removeAgent(ctx context.Context, agent *woodpecker.Agent, o
 	}
 
 	delete(a.agents, agent.Name)
+	if agent.LastContact == 0 && a.outdatedReplacementAttempted {
+		if id, existed := a.outdatedDrainExistingAgents[agent.Name]; !existed || id != agent.ID {
+			a.recordReplacementFailure()
+		}
+	}
 
 	return nil
 }

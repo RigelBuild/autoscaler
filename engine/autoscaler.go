@@ -49,6 +49,10 @@ type Autoscaler struct {
 	outdatedDrainWarned bool
 	// outdatedDrainFailures counts re-armed replacement attempts.
 	outdatedDrainFailures int
+	// outdatedReplacementAttempted keeps the gate closed after a failed boot.
+	outdatedReplacementAttempted bool
+	// outdatedNoBoundWarned suppresses repeated disabled-deadline warnings.
+	outdatedNoBoundWarned bool
 
 	// danglingSince records, per provider instance name, when it first went
 	// missing from the woodpecker agent list. cleanupDanglingAgents defers
@@ -91,6 +95,12 @@ func NewAutoscaler(ctx context.Context, p types.Provider, client server.Client, 
 	}, nil
 }
 
+func (a *Autoscaler) recordReplacementFailure() {
+	a.outdatedDrainSince = time.Now()
+	a.outdatedDrainFailures++
+	log.Warn().Int("failures", a.outdatedDrainFailures).Msg("replacement did not connect; retrying outdated agent rollout")
+}
+
 // Reconcile periodically checks the status of the agent pool and adjusts
 // it to match the desired capacity based on the current queue state.
 //
@@ -118,6 +128,10 @@ func (a *Autoscaler) Reconcile(ctx context.Context) error {
 		old, present := a.agents[a.outdatedDrainAgent]
 		if !present || old.ID != a.outdatedDrainExistingAgents[a.outdatedDrainAgent] {
 			bound := a.replacementBootBound()
+			if bound <= 0 && a.outdatedReplacementAttempted && !a.outdatedNoBoundWarned {
+				log.Warn().Msg("outdated agent replacement has no boot deadline")
+				a.outdatedNoBoundWarned = true
+			}
 			if bound > 0 && !a.outdatedDrainSince.IsZero() && time.Since(a.outdatedDrainSince) > bound {
 				for _, agent := range a.agents {
 					if id, existed := a.outdatedDrainExistingAgents[agent.Name]; (existed && id == agent.ID) || agent.LastContact != 0 {
@@ -131,9 +145,6 @@ func (a *Autoscaler) Reconcile(ctx context.Context) error {
 					}
 					delete(a.pendingDeploys, agent.Name)
 				}
-				a.outdatedDrainSince = time.Now()
-				a.outdatedDrainFailures++
-				log.Warn().Int("failures", a.outdatedDrainFailures).Msg("replacement did not connect; retrying outdated agent rollout")
 			}
 		}
 	}

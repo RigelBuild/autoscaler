@@ -155,12 +155,12 @@ func Test_drainOutdatedAgents(t *testing.T) {
 		client := mocks_server.NewMockClient(t)
 		drained := &woodpecker.Agent{ID: 1, Name: "pool-1-agent-outdated", NoSchedule: true, LastContact: time.Now().Unix()}
 		a := Autoscaler{
-			agents:             agentsByName(drained),
-			client:             client,
-			outdatedDrainAgent: drained.Name,
+			agents:                      agentsByName(drained),
+			client:                      client,
+			outdatedDrainAgent:          drained.Name,
 			outdatedDrainExistingAgents: map[string]int64{drained.Name: drained.ID},
-			outdatedDrainSince: time.Now().Add(-time.Hour),
-			config:             &config.Config{AgentInactivityTimeout: time.Minute},
+			outdatedDrainSince:          time.Now().Add(-time.Hour),
+			config:                      &config.Config{AgentInactivityTimeout: time.Minute},
 		}
 		require.NoError(t, a.drainOutdatedAgents(map[string]struct{}{drained.Name: {}}))
 		assert.True(t, a.outdatedDrainWarned)
@@ -396,8 +396,12 @@ func Test_reconcile_drainsOutdatedAgentsGradually(t *testing.T) {
 
 	serverReplacement := a.agents["pool-1-agent-new"]
 	serverReplacement.LastContact = time.Now().Unix()
+	serverReplacement.Platform = "linux/amd64"
+	serverReplacement.Backend = "docker"
+	_, err := client.AgentUpdate(serverReplacement)
+	require.NoError(t, err)
 	require.NoError(t, a.Reconcile(t.Context()))
-	assert.Equal(t, 2, countMockCalls(client.Calls, "AgentUpdate"), "the next outdated agent drains after replacement connects")
+	assert.Equal(t, 3, countMockCalls(client.Calls, "AgentUpdate"), "the next outdated agent drains after replacement connects")
 }
 
 func Test_reconcile_failedReplacementKeepsDrainGate(t *testing.T) {
@@ -416,11 +420,25 @@ func Test_reconcile_failedReplacementKeepsDrainGate(t *testing.T) {
 	})
 }
 
+func Test_reconcile_quietPoolContinuesRollout(t *testing.T) {
+	client, a := newOutdatedRolloutAutoscaler(t, 2)
+	a.config.MinAgents = 1
+	for _, call := range client.ExpectedCalls {
+		if call.Method == "QueueInfo" {
+			call.ReturnArguments = mock.Arguments{&woodpecker.Info{}, nil}
+		}
+	}
+	require.NoError(t, a.Reconcile(t.Context()))
+	require.NoError(t, a.Reconcile(t.Context()))
+	assert.Equal(t, 2, countMockCalls(client.Calls, "AgentUpdate"))
+	assert.Zero(t, a.outdatedDrainFailures)
+}
+
 func Test_replacementBootBound(t *testing.T) {
 	for _, tc := range []struct {
-		name string
+		name                 string
 		creation, inactivity time.Duration
-		bounded bool
+		bounded              bool
 	}{
 		{name: "creation", creation: time.Minute, inactivity: 2 * time.Minute, bounded: true},
 		{name: "fallback", inactivity: time.Minute, bounded: true},
@@ -472,7 +490,7 @@ func Test_drainOutdatedAgents_reusedName(t *testing.T) {
 	replacement := &woodpecker.Agent{ID: 2, Name: "pool-1-agent-old", LastContact: time.Now().Unix()}
 	a := Autoscaler{
 		agents: agentsByName(replacement), client: client, config: &config.Config{},
-		outdatedDrainAgent: replacement.Name,
+		outdatedDrainAgent:          replacement.Name,
 		outdatedDrainExistingAgents: map[string]int64{replacement.Name: 1},
 	}
 	require.NoError(t, a.drainOutdatedAgents(nil))
@@ -498,6 +516,10 @@ func Test_reconcile_replacesIdleOutdatedAgentAtMaxAgentsOne(t *testing.T) {
 	require.NoError(t, a.Reconcile(t.Context()))
 	replacement = a.agents[replacement.Name]
 	replacement.LastContact = time.Now().Unix()
+	replacement.Platform = "linux/amd64"
+	replacement.Backend = "docker"
+	_, err := client.AgentUpdate(replacement)
+	require.NoError(t, err)
 	require.NoError(t, a.Reconcile(t.Context()))
 	assert.Empty(t, a.pendingDeploys)
 	assert.False(t, replacement.NoSchedule)
@@ -538,7 +560,8 @@ func newOutdatedRolloutAutoscaler(t *testing.T, agentCount int) (*mocks_server.M
 	client.On("AgentListWithOpts", woodpecker.AgentListOptions{Page: 1}).Return(func(woodpecker.AgentListOptions) ([]*woodpecker.Agent, error) {
 		out := make([]*woodpecker.Agent, 0, len(serverAgents))
 		for _, agent := range serverAgents {
-			out = append(out, agent)
+			copy := *agent
+			out = append(out, &copy)
 		}
 		return out, nil
 	}).Maybe()
@@ -557,10 +580,11 @@ func newOutdatedRolloutAutoscaler(t *testing.T, agentCount int) (*mocks_server.M
 		{Labels: map[string]string{"platform": "linux/amd64", "repo": "rigel/x", "org-id": "1"}},
 		{Labels: map[string]string{"platform": "linux/amd64", "repo": "rigel/x", "org-id": "1"}},
 	}}, nil)
-	client.On("AgentUpdate", mock.MatchedBy(func(agent *woodpecker.Agent) bool {
-		return agent.NoSchedule
-	})).Return(func(agent *woodpecker.Agent) (*woodpecker.Agent, error) {
-		serverAgents[agent.Name] = agent
+	client.On("AgentUpdate", mock.Anything).Return(func(agent *woodpecker.Agent) (*woodpecker.Agent, error) {
+		if existing, ok := serverAgents[agent.Name]; ok && existing.ID == agent.ID {
+			copy := *agent
+			serverAgents[agent.Name] = &copy
+		}
 		return agent, nil
 	}).Maybe()
 	client.On("AgentTasksList", mock.Anything).Return([]*woodpecker.Task{}, nil).Maybe()
