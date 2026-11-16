@@ -4,7 +4,7 @@
 
 ### 🐛 Bug Fixes
 
-- Replace idle outdated agents in the same scaler cycle, and wait for replacements to connect before draining the next agent. Failed boots time out and are removed; the rollout never exceeds `MaxAgents` (RIG-10331).
+- Replace idle outdated agents in the same scaler cycle, and wait for replacements to connect before draining the next agent. Failed boots are removed and retried without advancing the rollout; the pool never exceeds `MaxAgents` (RIG-10331).
 
 ## [2.0.0](https://github.com/woodpecker-ci/autoscaler/releases/tag/2.0.0) - 2026-10-17
 

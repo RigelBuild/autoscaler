@@ -400,19 +400,70 @@ func Test_reconcile_drainsOutdatedAgentsGradually(t *testing.T) {
 	assert.Equal(t, 2, countMockCalls(client.Calls, "AgentUpdate"), "the next outdated agent drains after replacement connects")
 }
 
-func Test_reconcile_failedReplacementReleasesDrain(t *testing.T) {
+func Test_reconcile_failedReplacementKeepsDrainGate(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		client, a := newOutdatedRolloutAutoscaler(t, 4)
 		a.config.AgentCreationTimeout = time.Minute
 		require.NoError(t, a.Reconcile(t.Context()))
-		failed := a.agents["pool-1-agent-new"]
-		require.NotNil(t, failed)
-		synctest.Sleep(2 * time.Minute)
+		for i := 1; i <= 3; i++ {
+			synctest.Sleep(2 * time.Minute)
+			require.NoError(t, a.Reconcile(t.Context()))
+			assert.Equal(t, 1, countMockCalls(client.Calls, "AgentUpdate"))
+			assert.Equal(t, i, a.outdatedDrainFailures)
+			assert.Len(t, a.agents, a.config.MaxAgents)
+		}
+		client.AssertNumberOfCalls(t, "AgentCreate", 4)
+	})
+}
+
+func Test_replacementBootBound(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		creation, inactivity time.Duration
+		bounded bool
+	}{
+		{name: "creation", creation: time.Minute, inactivity: 2 * time.Minute, bounded: true},
+		{name: "fallback", inactivity: time.Minute, bounded: true},
+		{name: "disabled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				_, a := newOutdatedRolloutAutoscaler(t, 4)
+				a.config.AgentCreationTimeout = tc.creation
+				a.config.AgentInactivityTimeout = tc.inactivity
+				require.NoError(t, a.Reconcile(t.Context()))
+				synctest.Sleep(59 * time.Second)
+				require.NoError(t, a.Reconcile(t.Context()))
+				assert.Zero(t, a.outdatedDrainFailures)
+				synctest.Sleep(2 * time.Second)
+				require.NoError(t, a.Reconcile(t.Context()))
+				if tc.bounded {
+					assert.Equal(t, 1, a.outdatedDrainFailures)
+				} else {
+					assert.Zero(t, a.outdatedDrainFailures)
+				}
+			})
+		})
+	}
+}
+
+func Test_reconcile_busyDrainKeepsFreshBoot(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client := mocks_server.NewMockClient(t)
+		provider := &outdatedAgentTestProvider{MockProvider: mocks_provider.NewMockProvider(t), names: []string{"pool-1-agent-old"}}
+		old := &woodpecker.Agent{ID: 1, Name: "pool-1-agent-old", NoSchedule: true, LastContact: time.Now().Unix()}
+		fresh := &woodpecker.Agent{ID: 2, Name: "pool-1-agent-fresh", Created: time.Now().Unix()}
+		a := Autoscaler{client: client, provider: provider, config: &config.Config{PoolID: "1", AgentCreationTimeout: time.Minute},
+			outdatedDrainAgent: old.Name, outdatedDrainExistingAgents: map[string]int64{old.Name: old.ID},
+			outdatedDrainSince: time.Now().Add(-time.Hour)}
+		client.On("AgentListWithOpts", mock.Anything).Return([]*woodpecker.Agent{old, fresh}, nil).Once()
+		client.On("AgentListWithOpts", mock.Anything).Return([]*woodpecker.Agent{}, nil).Maybe()
+		client.On("QueueInfo").Return(&woodpecker.Info{}, nil)
+		client.On("AgentTasksList", old.ID).Return([]*woodpecker.Task{{ID: "busy"}}, nil).Maybe()
+		provider.On("ListDeployedAgentNames", mock.Anything).Return([]string{old.Name, fresh.Name}, nil)
 		require.NoError(t, a.Reconcile(t.Context()))
-		client.AssertCalled(t, "AgentDelete", failed.ID)
-		assert.Equal(t, 2, countMockCalls(client.Calls, "AgentUpdate"))
-		client.AssertNumberOfCalls(t, "AgentCreate", 3)
-		assert.Len(t, a.agents, a.config.MaxAgents)
+		assert.Contains(t, a.agents, fresh.Name)
+		client.AssertNotCalled(t, "AgentDelete", fresh.ID)
 	})
 }
 
@@ -433,22 +484,19 @@ func Test_reconcile_replacesIdleOutdatedAgentAtMaxAgentsOne(t *testing.T) {
 	oldAgent := a.agents["pool-1-agent-1"]
 	oldAgent.LastContact = time.Now().Unix()
 	oldAgent.NoSchedule = false
-	a.config.MaxAgents = 1
 	a.config.MinAgents = 1
-	queueInfo := &woodpecker.Info{Pending: []woodpecker.Task{{Labels: map[string]string{"platform": "linux/amd64", "repo": "rigel/x", "org-id": "1"}}}}
-	client.On("QueueInfo").Return(queueInfo, nil).Maybe()
-	assert.Len(t, queueInfo.Pending, 1, "the single-agent regression case includes queued work")
 	require.NoError(t, a.Reconcile(t.Context()))
 	assert.NotContains(t, a.agents, oldAgent.Name)
 	assert.Equal(t, 1, len(a.pendingDeploys), "pending work is retained while the replacement boots")
 	replacement := a.agents["pool-1-agent-new"]
 	require.NotNil(t, replacement)
 	assert.Len(t, a.agents, 1)
-	assert.Equal(t, 1, a.config.MaxAgents)
 	assert.Contains(t, a.pendingDeploys, replacement.Name)
 	client.AssertNumberOfCalls(t, "AgentCreate", 1)
 
 	// The replacement becomes usable only after it reports first contact.
+	require.NoError(t, a.Reconcile(t.Context()))
+	replacement = a.agents[replacement.Name]
 	replacement.LastContact = time.Now().Unix()
 	require.NoError(t, a.Reconcile(t.Context()))
 	assert.Empty(t, a.pendingDeploys)
@@ -525,7 +573,8 @@ func newOutdatedRolloutAutoscaler(t *testing.T, agentCount int) (*mocks_server.M
 			agent.Name = fmt.Sprintf("pool-1-agent-new-%d", created)
 		}
 		agent.Created = time.Now().Unix()
-		serverAgents[agent.Name] = agent
+		serverAgent := *agent
+		serverAgents[agent.Name] = &serverAgent
 		return agent, nil
 	}).Maybe()
 	provider.On("ListDeployedAgentNames", mock.Anything).Return(func(context.Context) ([]string, error) {

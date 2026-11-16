@@ -36,15 +36,19 @@ type Autoscaler struct {
 	providerCapabilities []types.Capability
 	scope                poolScope
 
-	// pendingDeploys remembers, by agent name, the capability each agent was
-	// deployed for until it first connects. A freshly deployed agent reports
-	// no platform or backend before its first contact, so without this record
-	// the planner would re-provision the same demand while it boots.
-	pendingDeploys              map[string]types.Capability
-	outdatedDrainAgent          string
+	// pendingDeploys attributes booting agents until they report their capability.
+	// This and the rollout state are in memory only; a restart loses both.
+	pendingDeploys map[string]types.Capability
+	// outdatedDrainAgent identifies the agent whose replacement must connect.
+	outdatedDrainAgent string
+	// outdatedDrainExistingAgents distinguishes new registrations by name and ID.
 	outdatedDrainExistingAgents map[string]int64
-	outdatedDrainSince          time.Time
-	outdatedDrainWarned         bool
+	// outdatedDrainSince records the drain or latest replacement attempt time.
+	outdatedDrainSince time.Time
+	// outdatedDrainWarned suppresses repeated warnings for a busy drain.
+	outdatedDrainWarned bool
+	// outdatedDrainFailures counts re-armed replacement attempts.
+	outdatedDrainFailures int
 
 	// danglingSince records, per provider instance name, when it first went
 	// missing from the woodpecker agent list. cleanupDanglingAgents defers
@@ -111,22 +115,25 @@ func (a *Autoscaler) Reconcile(ctx context.Context) error {
 		return fmt.Errorf("listing outdated agents failed: %w", err)
 	}
 	if a.outdatedDrainAgent != "" {
-		timeout := a.config.AgentCreationTimeout
-		if timeout <= 0 {
-			timeout = a.config.AgentInactivityTimeout
-		}
-		if timeout <= 0 {
-			timeout = 15 * time.Minute
-		}
-		if !a.outdatedDrainSince.IsZero() && time.Since(a.outdatedDrainSince) > timeout {
-			for _, agent := range a.agents {
-				if id, existed := a.outdatedDrainExistingAgents[agent.Name]; (existed && id == agent.ID) || agent.LastContact != 0 {
-					continue
+		old, present := a.agents[a.outdatedDrainAgent]
+		if !present || old.ID != a.outdatedDrainExistingAgents[a.outdatedDrainAgent] {
+			bound := a.replacementBootBound()
+			if bound > 0 && !a.outdatedDrainSince.IsZero() && time.Since(a.outdatedDrainSince) > bound {
+				for _, agent := range a.agents {
+					if id, existed := a.outdatedDrainExistingAgents[agent.Name]; (existed && id == agent.ID) || agent.LastContact != 0 {
+						continue
+					}
+					if time.Since(time.Unix(agent.Created, 0)) <= bound {
+						continue
+					}
+					if err := a.removeAgent(ctx, agent, false, "replacement failed to connect"); err != nil {
+						return fmt.Errorf("removing failed replacement: %w", err)
+					}
+					delete(a.pendingDeploys, agent.Name)
 				}
-				if err := a.removeAgent(ctx, agent, false, "replacement failed to connect"); err != nil {
-					return fmt.Errorf("removing failed replacement: %w", err)
-				}
-				delete(a.pendingDeploys, agent.Name)
+				a.outdatedDrainSince = time.Now()
+				a.outdatedDrainFailures++
+				log.Warn().Int("failures", a.outdatedDrainFailures).Msg("replacement did not connect; retrying outdated agent rollout")
 			}
 		}
 	}
