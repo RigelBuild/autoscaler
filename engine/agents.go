@@ -61,6 +61,14 @@ func (a *Autoscaler) loadAgents(_ context.Context) error {
 	return nil
 }
 
+// replacementBootBound falls back to inactivity timeout; zero disables the deadline.
+func (a *Autoscaler) replacementBootBound() time.Duration {
+	if a.config.AgentCreationTimeout > 0 {
+		return a.config.AgentCreationTimeout
+	}
+	return a.config.AgentInactivityTimeout
+}
+
 // bootDeadlineExceeded reports whether an agent has been booting for longer
 // than the configured creation timeout. A zero timeout disables the deadline.
 func (a *Autoscaler) bootDeadlineExceeded(agent *woodpecker.Agent) bool {
@@ -146,6 +154,12 @@ func (a *Autoscaler) createAgents(ctx context.Context, bucket agentBucket, amoun
 		agent.Backend = string(bucket.Capability.Backend)
 
 		a.agents[agent.Name] = agent
+		if a.outdatedDrainAgent != "" {
+			if _, exists := a.agents[a.outdatedDrainAgent]; !exists {
+				a.outdatedReplacementAttempted = true
+				a.outdatedDrainSince = time.Now()
+			}
+		}
 	}
 
 	return nil
@@ -245,21 +259,145 @@ func (a *Autoscaler) outdatedAgentNames(ctx context.Context) (map[string]struct{
 	return outdated, nil
 }
 
-// drainOutdatedAgents flags every schedulable outdated pool agent NoSchedule so
-// it stops taking work. It drains regardless of idleness: a busy outdated agent
-// finishes its task, and removeDrainedAgents removes it once task-free. Drained
-// outdated agents hold their MaxAgents slot until then, so a rollout replaces
-// them gradually instead of surging.
-func (a *Autoscaler) drainOutdatedAgents(outdated map[string]struct{}) error {
+// drainOutdatedAgents waits for each replacement to connect before draining
+// another agent. A busy drained agent deliberately stops rollout progress.
+func (a *Autoscaler) drainOutdatedAgents(outdated map[string]struct{}, quiet bool) error {
+	if a.outdatedDrainAgent != "" {
+		if drained, exists := a.agents[a.outdatedDrainAgent]; exists && drained.ID == a.outdatedDrainExistingAgents[a.outdatedDrainAgent] {
+			if a.outdatedDrainSince.IsZero() {
+				a.outdatedDrainSince = time.Now()
+			}
+			if !a.outdatedDrainWarned && a.config.AgentInactivityTimeout > 0 &&
+				time.Since(a.outdatedDrainSince) > a.config.AgentInactivityTimeout {
+				a.warnStalledOutdatedDrain(drained)
+				a.outdatedDrainWarned = true
+			}
+			return nil
+		}
+		replacementFound := false
+		for _, agent := range a.agents {
+			if _, isOutdated := outdated[agent.Name]; isOutdated && agent.ID == a.outdatedDrainExistingAgents[agent.Name] {
+				continue
+			}
+			_, pendingDeploy := a.pendingDeploys[agent.Name]
+			if agent.LastContact == 0 || pendingDeploy {
+				a.warnBootingReplacement(agent)
+				return nil
+			}
+			if id, existed := a.outdatedDrainExistingAgents[agent.Name]; existed && id == agent.ID {
+				continue
+			}
+			replacementFound = true
+		}
+		if !replacementFound && (a.outdatedReplacementAttempted || !quiet) {
+			return nil
+		}
+		a.outdatedDrainAgent = ""
+		a.outdatedDrainExistingAgents = nil
+		a.outdatedDrainFailures = 0
+		a.outdatedReplacementAttempted = false
+		a.outdatedNoBoundWarned = false
+	}
+
+	var existingDrain *woodpecker.Agent
 	for _, agent := range a.agents {
-		if _, ok := outdated[agent.Name]; !ok || agent.NoSchedule {
+		if _, isOutdated := outdated[agent.Name]; !isOutdated || !agent.NoSchedule {
 			continue
 		}
-		if err := a.markAgentForDrain(agent); err != nil {
-			return err
+		if existingDrain == nil || agent.Name < existingDrain.Name {
+			existingDrain = agent
 		}
 	}
+	if existingDrain != nil {
+		if a.outdatedDrainAgent == "" {
+			a.outdatedDrainExistingAgents = currentAgentNames(a.agents)
+			a.outdatedDrainSince = time.Now()
+			a.outdatedDrainWarned = false
+		}
+		a.outdatedDrainAgent = existingDrain.Name
+		return nil
+	}
+	for _, agent := range a.agents {
+		if _, isOutdated := outdated[agent.Name]; isOutdated {
+			continue
+		}
+		_, pendingDeploy := a.pendingDeploys[agent.Name]
+		if agent.LastContact == 0 || pendingDeploy {
+			a.warnBootingReplacement(agent)
+			return nil
+		}
+	}
+
+	var neverContacted, oldestIdle, firstBusy *woodpecker.Agent
+	for _, agent := range a.agents {
+		if _, isOutdated := outdated[agent.Name]; !isOutdated || agent.NoSchedule {
+			continue
+		}
+		if agent.LastContact == 0 {
+			if neverContacted == nil || agent.Name < neverContacted.Name {
+				neverContacted = agent
+			}
+			continue
+		}
+		idle, err := a.isAgentIdle(agent, true)
+		if err != nil {
+			return err
+		}
+		if idle {
+			if oldestIdle == nil || agent.LastWork < oldestIdle.LastWork ||
+				(agent.LastWork == oldestIdle.LastWork && agent.Name < oldestIdle.Name) {
+				oldestIdle = agent
+			}
+			continue
+		}
+		if firstBusy == nil || agent.Name < firstBusy.Name {
+			firstBusy = agent
+		}
+	}
+
+	candidate := neverContacted
+	if candidate == nil {
+		candidate = oldestIdle
+	}
+	if candidate == nil {
+		candidate = firstBusy
+	}
+	if candidate == nil {
+		return nil
+	}
+	if err := a.markAgentForDrain(candidate); err != nil {
+		return err
+	}
+	a.outdatedDrainExistingAgents = currentAgentNames(a.agents)
+	a.outdatedDrainAgent = candidate.Name
+	a.outdatedDrainSince = time.Now()
+	a.outdatedDrainWarned = false
 	return nil
+}
+
+func currentAgentNames(agents map[string]*woodpecker.Agent) map[string]int64 {
+	names := make(map[string]int64, len(agents))
+	for name, agent := range agents {
+		names[name] = agent.ID
+	}
+	return names
+}
+func (a *Autoscaler) warnBootingReplacement(agent *woodpecker.Agent) {
+	timeout := a.replacementBootBound()
+	if timeout <= 0 || time.Since(time.Unix(agent.Created, 0)) <= timeout {
+		return
+	}
+	log.Warn().Str("agent", agent.Name).Dur("timeout", timeout).
+		Msg("outdated agent rollout is waiting for a replacement past its boot deadline")
+}
+
+func (a *Autoscaler) warnStalledOutdatedDrain(agent *woodpecker.Agent) {
+	timeout := a.config.AgentInactivityTimeout
+	if timeout <= 0 {
+		return
+	}
+	log.Warn().Str("agent", agent.Name).Dur("timeout", timeout).
+		Msg("outdated agent drain is blocking rollout past the inactivity deadline")
 }
 
 func (a *Autoscaler) isAgentIdle(agent *woodpecker.Agent, outdated bool) (bool, error) {
@@ -313,6 +451,11 @@ func (a *Autoscaler) removeAgent(ctx context.Context, agent *woodpecker.Agent, o
 	}
 
 	delete(a.agents, agent.Name)
+	if agent.LastContact == 0 && a.outdatedReplacementAttempted {
+		if id, existed := a.outdatedDrainExistingAgents[agent.Name]; !existed || id != agent.ID {
+			a.recordReplacementFailure()
+		}
+	}
 
 	return nil
 }
