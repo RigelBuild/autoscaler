@@ -429,8 +429,18 @@ func Test_reconcile_quietPoolContinuesRollout(t *testing.T) {
 	assert.Zero(t, a.outdatedDrainFailures)
 }
 
+func Test_reconcile_unmatchedPendingContinuesRollout(t *testing.T) {
+	queue := &woodpecker.Info{Pending: []woodpecker.Task{{Labels: map[string]string{"platform": "linux/arm64"}}}}
+	client, a := newOutdatedRolloutAutoscaler(t, 2, queue)
+	a.config.MinAgents = 1
+	require.NoError(t, a.Reconcile(t.Context()))
+	require.NoError(t, a.Reconcile(t.Context()))
+	assert.Equal(t, 2, countDrainCalls(client.Calls))
+}
+
 func Test_reconcile_deployFailureKeepsDrainGate(t *testing.T) {
 	client, a := newOutdatedRolloutAutoscaler(t, 4, nil)
+	a.config.MinAgents = 1
 	provider := a.provider.(*outdatedAgentTestProvider)
 	for _, call := range provider.ExpectedCalls {
 		if call.Method == "DeployAgent" {

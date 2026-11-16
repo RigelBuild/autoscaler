@@ -129,8 +129,10 @@ func (a *Autoscaler) Reconcile(ctx context.Context) error {
 		return fmt.Errorf("loading queue info failed: %w", err)
 	}
 	quiet := len(a.agents) >= a.config.MinAgents
+	// Pause rollout while pending work routes to this pool.
+	buckets := a.agentBuckets()
 	for _, task := range a.poolEligiblePending(queueInfo.Pending) {
-		if routeTaskToBucket(task, a.agentBuckets()) >= 0 {
+		if routeTaskToBucket(task, buckets) >= 0 {
 			quiet = false
 			break
 		}
