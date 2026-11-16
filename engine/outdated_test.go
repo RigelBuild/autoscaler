@@ -41,7 +41,8 @@ func agentsByName(agents ...*woodpecker.Agent) map[string]*woodpecker.Agent {
 }
 
 // Test_drainOutdatedAgents covers feature 2: outdated pool agents are drained
-// before planning so a rollout replaces them instead of reusing them.
+// before planning so a rollout replaces them instead of reusing them. A rollout
+// advances one agent at a time and waits while another outdated agent drains.
 func Test_drainOutdatedAgents(t *testing.T) {
 	t.Run("drains outdated schedulable pool agents", func(t *testing.T) {
 		client := mocks_server.NewMockClient(t)
@@ -65,20 +66,17 @@ func Test_drainOutdatedAgents(t *testing.T) {
 			provider:  provider,
 			client:    client,
 		}
-		client.On("AgentUpdate", mock.MatchedBy(func(agent *woodpecker.Agent) bool {
-			return (agent.ID == 1 || agent.ID == 3) && agent.NoSchedule
-		})).Return(nil, nil).Twice()
 
 		outdated, err := autoscaler.outdatedAgentNames(t.Context())
 		require.NoError(t, err)
 		require.NoError(t, autoscaler.drainOutdatedAgents(outdated))
-		assert.True(t, outdatedAgent.NoSchedule)
+		assert.False(t, outdatedAgent.NoSchedule, "wait while another outdated agent is draining")
 		assert.True(t, drainingAgent.NoSchedule)
-		// A never-contacted outdated agent can hold no work, so it is retired too.
-		assert.True(t, neverContacted.NoSchedule)
+		// A never-contacted outdated agent also waits for the current drain.
+		assert.False(t, neverContacted.NoSchedule)
 		assert.False(t, current.NoSchedule)
 		assert.False(t, nonPool.NoSchedule)
-		client.AssertNumberOfCalls(t, "AgentUpdate", 2)
+		client.AssertNotCalled(t, "AgentUpdate", mock.Anything)
 	})
 
 	t.Run("provider without outdated listing is a no-op", func(t *testing.T) {
@@ -293,4 +291,66 @@ func Test_removeDrainedAgents_outdated(t *testing.T) {
 		assert.Contains(t, autoscaler.agents, "pool-1-agent-outdated", "a busy outdated agent is not removed")
 		provider.AssertNotCalled(t, "RemoveAgent", mock.Anything, mock.Anything)
 	})
+}
+
+// Test_reconcile_drainsOutdatedAgentsGradually verifies that a full pool with
+// pending work retains schedulable capacity while outdated agents are rolled.
+func Test_reconcile_drainsOutdatedAgentsGradually(t *testing.T) {
+	client := mocks_server.NewMockClient(t)
+	provider := &outdatedAgentTestProvider{
+		MockProvider: mocks_provider.NewMockProvider(t),
+		names: []string{
+			"pool-1-agent-1",
+			"pool-1-agent-2",
+			"pool-1-agent-3",
+		},
+	}
+	agents := []*woodpecker.Agent{
+		{ID: 1, Name: "pool-1-agent-1", Platform: "linux/amd64", Backend: "docker", LastContact: time.Now().Unix()},
+		{ID: 2, Name: "pool-1-agent-2", Platform: "linux/amd64", Backend: "docker", LastContact: time.Now().Unix()},
+		{ID: 3, Name: "pool-1-agent-3", Platform: "linux/amd64", Backend: "docker", LastContact: time.Now().Unix()},
+	}
+	client.On("AgentListWithOpts", woodpecker.AgentListOptions{Page: 1}).Return(agents, nil).Once()
+	client.On("AgentListWithOpts", woodpecker.AgentListOptions{Page: 2}).Return([]*woodpecker.Agent{}, nil).Maybe()
+	client.On("QueueInfo").Return(&woodpecker.Info{Pending: []woodpecker.Task{
+		{Labels: map[string]string{"platform": "linux/amd64", "repo": "rigel/x", "org-id": "1"}},
+		{Labels: map[string]string{"platform": "linux/amd64", "repo": "rigel/x", "org-id": "1"}},
+		{Labels: map[string]string{"platform": "linux/amd64", "repo": "rigel/x", "org-id": "1"}},
+	}}, nil)
+	client.On("AgentUpdate", mock.MatchedBy(func(agent *woodpecker.Agent) bool {
+		return agent.NoSchedule
+	})).Return(nil, nil).Maybe()
+	client.On("AgentTasksList", mock.Anything).Return([]*woodpecker.Task{{ID: "pending-work"}}, nil).Maybe()
+	provider.On("ListDeployedAgentNames", mock.Anything).Return(provider.names, nil)
+
+	a := Autoscaler{
+		client:               client,
+		provider:             provider,
+		config: &config.Config{
+			WorkflowsPerAgent:      1,
+			MaxAgents:              len(agents),
+			MinAgents:              len(agents),
+			PoolID:                 "1",
+			AgentInactivityTimeout: 10 * time.Minute,
+			AgentIdleTimeout:       10 * time.Minute,
+		},
+		danglingSince:        map[string]time.Time{},
+		providerCapabilities: []types.Capability{dockerAmd64Cap},
+		scope:                instanceAdminPoolScope(),
+	}
+
+	require.NoError(t, a.Reconcile(t.Context()))
+
+	drained := 0
+	schedulable := 0
+	for _, agent := range a.agents {
+		if agent.NoSchedule {
+			drained++
+			continue
+		}
+		schedulable++
+	}
+	assert.Equal(t, 1, drained, "only one outdated agent may drain per reconcile")
+	assert.Greater(t, schedulable, 0, "pending work must retain a schedulable agent")
+	client.AssertNumberOfCalls(t, "AgentUpdate", 1)
 }
