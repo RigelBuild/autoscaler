@@ -39,14 +39,12 @@ type Autoscaler struct {
 	// pendingDeploys remembers, by agent name, the capability each agent was
 	// deployed for until it first connects. A freshly deployed agent reports
 	// no platform or backend before its first contact, so without this record
-	// it would match no bucket and the planner would re-provision the same
-	// demand every cycle while startup takes longer than the reconciliation
-	// interval. Entries are pruned once the agent connects (its self-reported
-	// identity wins from then on) or disappears. The record is in-memory
-	// only — after an autoscaler restart, agents still booting are
-	// unattributed until they connect, and scale-up in that window is bounded
-	// by the MaxAgents footprint as before.
-	pendingDeploys map[string]types.Capability
+	// the planner would re-provision the same demand while it boots.
+	pendingDeploys              map[string]types.Capability
+	outdatedDrainAgent          string
+	outdatedDrainExistingAgents map[string]struct{}
+	outdatedDrainSince          time.Time
+	outdatedDrainWarned         bool
 
 	// danglingSince records, per provider instance name, when it first went
 	// missing from the woodpecker agent list. cleanupDanglingAgents defers
@@ -112,8 +110,38 @@ func (a *Autoscaler) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listing outdated agents failed: %w", err)
 	}
+	if a.outdatedDrainAgent != "" {
+		timeout := a.config.AgentCreationTimeout
+		if timeout <= 0 {
+			timeout = a.config.AgentInactivityTimeout
+		}
+		if timeout <= 0 {
+			timeout = 15 * time.Minute
+		}
+		if !a.outdatedDrainSince.IsZero() && time.Since(a.outdatedDrainSince) > timeout {
+			for _, agent := range a.agents {
+				if _, existed := a.outdatedDrainExistingAgents[agent.Name]; existed || agent.LastContact != 0 {
+					continue
+				}
+				if err := a.removeAgent(ctx, agent, false, "replacement failed to connect"); err != nil {
+					return fmt.Errorf("removing failed replacement: %w", err)
+				}
+				delete(a.pendingDeploys, agent.Name)
+			}
+		}
+	}
+
 	if err := a.drainOutdatedAgents(outdated); err != nil {
 		return fmt.Errorf("draining outdated agents failed: %w", err)
+	}
+	// Free an idle outdated agent's slot before planning its replacement.
+	if agent, ok := a.agents[a.outdatedDrainAgent]; ok && agent.NoSchedule {
+		if err := a.removeAgent(ctx, agent, true, "was drained for replacement"); err != nil {
+			return fmt.Errorf("removing drained outdated agent failed: %w", err)
+		}
+		if _, exists := a.agents[agent.Name]; !exists {
+			a.outdatedDrainSince = time.Now()
+		}
 	}
 
 	queueInfo, err := a.client.QueueInfo()
