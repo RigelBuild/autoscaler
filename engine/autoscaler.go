@@ -124,6 +124,18 @@ func (a *Autoscaler) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listing outdated agents failed: %w", err)
 	}
+	queueInfo, err := a.client.QueueInfo()
+	if err != nil {
+		return fmt.Errorf("loading queue info failed: %w", err)
+	}
+	quiet := len(a.agents) >= a.config.MinAgents
+	for _, task := range a.poolEligiblePending(queueInfo.Pending) {
+		if routeTaskToBucket(task, a.agentBuckets()) >= 0 {
+			quiet = false
+			break
+		}
+	}
+
 	if a.outdatedDrainAgent != "" {
 		old, present := a.agents[a.outdatedDrainAgent]
 		if !present || old.ID != a.outdatedDrainExistingAgents[a.outdatedDrainAgent] {
@@ -149,7 +161,7 @@ func (a *Autoscaler) Reconcile(ctx context.Context) error {
 		}
 	}
 
-	if err := a.drainOutdatedAgents(outdated); err != nil {
+	if err := a.drainOutdatedAgents(outdated, quiet); err != nil {
 		return fmt.Errorf("draining outdated agents failed: %w", err)
 	}
 	// Free an idle outdated agent's slot before planning its replacement.
@@ -162,10 +174,6 @@ func (a *Autoscaler) Reconcile(ctx context.Context) error {
 		}
 	}
 
-	queueInfo, err := a.client.QueueInfo()
-	if err != nil {
-		return fmt.Errorf("loading queue info failed: %w", err)
-	}
 	log.Debug().
 		Int("pending", len(queueInfo.Pending)).
 		Int("running", len(queueInfo.Running)).

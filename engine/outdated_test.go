@@ -59,7 +59,7 @@ func Test_drainOutdatedAgents(t *testing.T) {
 		}
 		outdated, err := autoscaler.outdatedAgentNames(t.Context())
 		require.NoError(t, err)
-		require.NoError(t, autoscaler.drainOutdatedAgents(outdated))
+		require.NoError(t, autoscaler.drainOutdatedAgents(outdated, true))
 		assert.False(t, outdatedAgent.NoSchedule)
 		assert.True(t, drainingAgent.NoSchedule)
 		assert.False(t, neverContacted.NoSchedule)
@@ -76,7 +76,7 @@ func Test_drainOutdatedAgents(t *testing.T) {
 		client.On("AgentUpdate", mock.MatchedBy(func(agent *woodpecker.Agent) bool {
 			return agent.ID == aNeverContacted.ID && agent.NoSchedule
 		})).Return(nil, nil).Once()
-		require.NoError(t, a.drainOutdatedAgents(map[string]struct{}{zNeverContacted.Name: {}, aNeverContacted.Name: {}, busy.Name: {}}))
+		require.NoError(t, a.drainOutdatedAgents(map[string]struct{}{zNeverContacted.Name: {}, aNeverContacted.Name: {}, busy.Name: {}}, true))
 		assert.True(t, aNeverContacted.NoSchedule)
 		assert.False(t, zNeverContacted.NoSchedule)
 		assert.False(t, busy.NoSchedule)
@@ -94,7 +94,7 @@ func Test_drainOutdatedAgents(t *testing.T) {
 		client.On("AgentUpdate", mock.MatchedBy(func(agent *woodpecker.Agent) bool {
 			return agent.ID == oldIdle.ID && agent.NoSchedule
 		})).Return(nil, nil).Once()
-		require.NoError(t, a.drainOutdatedAgents(map[string]struct{}{oldIdle.Name: {}, newIdle.Name: {}, busy.Name: {}}))
+		require.NoError(t, a.drainOutdatedAgents(map[string]struct{}{oldIdle.Name: {}, newIdle.Name: {}, busy.Name: {}}, true))
 		assert.True(t, oldIdle.NoSchedule)
 		assert.False(t, newIdle.NoSchedule)
 		assert.False(t, busy.NoSchedule)
@@ -109,7 +109,7 @@ func Test_drainOutdatedAgents(t *testing.T) {
 		client.On("AgentUpdate", mock.MatchedBy(func(agent *woodpecker.Agent) bool {
 			return agent.ID == outdated.ID && agent.NoSchedule
 		})).Return(nil, nil).Once()
-		require.NoError(t, a.drainOutdatedAgents(map[string]struct{}{outdated.Name: {}}))
+		require.NoError(t, a.drainOutdatedAgents(map[string]struct{}{outdated.Name: {}}, true))
 		assert.True(t, currentDraining.NoSchedule)
 		assert.True(t, outdated.NoSchedule)
 		client.AssertNumberOfCalls(t, "AgentUpdate", 1)
@@ -128,7 +128,7 @@ func Test_drainOutdatedAgents(t *testing.T) {
 			config:                      &config.Config{AgentCreationTimeout: time.Minute},
 		}
 
-		require.NoError(t, a.drainOutdatedAgents(map[string]struct{}{outdated.Name: {}}))
+		require.NoError(t, a.drainOutdatedAgents(map[string]struct{}{outdated.Name: {}}, true))
 
 		client.AssertNotCalled(t, "AgentUpdate", mock.Anything)
 	})
@@ -147,7 +147,7 @@ func Test_drainOutdatedAgents(t *testing.T) {
 			config: &config.Config{AgentCreationTimeout: time.Minute},
 		}
 
-		require.NoError(t, a.drainOutdatedAgents(map[string]struct{}{outdated.Name: {}}))
+		require.NoError(t, a.drainOutdatedAgents(map[string]struct{}{outdated.Name: {}}, true))
 
 		client.AssertNotCalled(t, "AgentUpdate", mock.Anything)
 	})
@@ -162,7 +162,7 @@ func Test_drainOutdatedAgents(t *testing.T) {
 			outdatedDrainSince:          time.Now().Add(-time.Hour),
 			config:                      &config.Config{AgentInactivityTimeout: time.Minute},
 		}
-		require.NoError(t, a.drainOutdatedAgents(map[string]struct{}{drained.Name: {}}))
+		require.NoError(t, a.drainOutdatedAgents(map[string]struct{}{drained.Name: {}}, true))
 		assert.True(t, a.outdatedDrainWarned)
 		client.AssertNotCalled(t, "AgentUpdate", mock.Anything)
 	})
@@ -183,7 +183,7 @@ func Test_drainOutdatedAgents(t *testing.T) {
 		outdated, err := autoscaler.outdatedAgentNames(t.Context())
 		require.NoError(t, err)
 		require.Nil(t, outdated)
-		require.NoError(t, autoscaler.drainOutdatedAgents(outdated))
+		require.NoError(t, autoscaler.drainOutdatedAgents(outdated, true))
 		client.AssertNotCalled(t, "AgentUpdate", mock.Anything)
 	})
 
@@ -200,7 +200,7 @@ func Test_drainOutdatedAgents(t *testing.T) {
 			client: client,
 		}
 
-		err := autoscaler.drainOutdatedAgents(map[string]struct{}{"pool-1-agent-outdated": {}})
+		err := autoscaler.drainOutdatedAgents(map[string]struct{}{"pool-1-agent-outdated": {}}, true)
 		require.ErrorContains(t, err, "server unavailable")
 	})
 
@@ -383,16 +383,16 @@ func Test_removeDrainedAgents_outdated(t *testing.T) {
 }
 
 func Test_reconcile_drainsOutdatedAgentsGradually(t *testing.T) {
-	client, a := newOutdatedRolloutAutoscaler(t, 4)
+	client, a := newOutdatedRolloutAutoscaler(t, 4, nil)
 	require.NoError(t, a.Reconcile(t.Context()))
-	assert.Equal(t, 1, countMockCalls(client.Calls, "AgentUpdate"))
+	assert.Equal(t, 1, countDrainCalls(client.Calls))
 	assert.Contains(t, a.pendingDeploys, "pool-1-agent-new")
 	assert.Equal(t, 0, countNoSchedule(a.agents))
 	assert.Len(t, a.agents, a.config.MaxAgents)
 
 	// A booting replacement blocks the next outdated agent.
 	require.NoError(t, a.Reconcile(t.Context()))
-	assert.Equal(t, 1, countMockCalls(client.Calls, "AgentUpdate"))
+	assert.Equal(t, 1, countDrainCalls(client.Calls))
 
 	serverReplacement := a.agents["pool-1-agent-new"]
 	serverReplacement.LastContact = time.Now().Unix()
@@ -401,18 +401,18 @@ func Test_reconcile_drainsOutdatedAgentsGradually(t *testing.T) {
 	_, err := client.AgentUpdate(serverReplacement)
 	require.NoError(t, err)
 	require.NoError(t, a.Reconcile(t.Context()))
-	assert.Equal(t, 3, countMockCalls(client.Calls, "AgentUpdate"), "the next outdated agent drains after replacement connects")
+	assert.Equal(t, 2, countDrainCalls(client.Calls), "the next outdated agent drains after replacement connects")
 }
 
 func Test_reconcile_failedReplacementKeepsDrainGate(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		client, a := newOutdatedRolloutAutoscaler(t, 4)
+		client, a := newOutdatedRolloutAutoscaler(t, 4, nil)
 		a.config.AgentCreationTimeout = time.Minute
 		require.NoError(t, a.Reconcile(t.Context()))
 		for i := 1; i <= 3; i++ {
 			synctest.Sleep(2 * time.Minute)
 			require.NoError(t, a.Reconcile(t.Context()))
-			assert.Equal(t, 1, countMockCalls(client.Calls, "AgentUpdate"))
+			assert.Equal(t, 1, countDrainCalls(client.Calls))
 			assert.Equal(t, i, a.outdatedDrainFailures)
 			assert.Len(t, a.agents, a.config.MaxAgents)
 		}
@@ -421,17 +421,26 @@ func Test_reconcile_failedReplacementKeepsDrainGate(t *testing.T) {
 }
 
 func Test_reconcile_quietPoolContinuesRollout(t *testing.T) {
-	client, a := newOutdatedRolloutAutoscaler(t, 2)
+	client, a := newOutdatedRolloutAutoscaler(t, 2, &woodpecker.Info{})
 	a.config.MinAgents = 1
-	for _, call := range client.ExpectedCalls {
-		if call.Method == "QueueInfo" {
-			call.ReturnArguments = mock.Arguments{&woodpecker.Info{}, nil}
+	require.NoError(t, a.Reconcile(t.Context()))
+	require.NoError(t, a.Reconcile(t.Context()))
+	assert.Equal(t, 2, countDrainCalls(client.Calls))
+	assert.Zero(t, a.outdatedDrainFailures)
+}
+
+func Test_reconcile_deployFailureKeepsDrainGate(t *testing.T) {
+	client, a := newOutdatedRolloutAutoscaler(t, 4, nil)
+	provider := a.provider.(*outdatedAgentTestProvider)
+	for _, call := range provider.ExpectedCalls {
+		if call.Method == "DeployAgent" {
+			call.ReturnArguments = mock.Arguments{fmt.Errorf("deploy failed")}
 		}
 	}
-	require.NoError(t, a.Reconcile(t.Context()))
-	require.NoError(t, a.Reconcile(t.Context()))
-	assert.Equal(t, 2, countMockCalls(client.Calls, "AgentUpdate"))
-	assert.Zero(t, a.outdatedDrainFailures)
+	for range 3 {
+		require.ErrorContains(t, a.Reconcile(t.Context()), "deploy failed")
+		assert.Equal(t, 1, countDrainCalls(client.Calls))
+	}
 }
 
 func Test_replacementBootBound(t *testing.T) {
@@ -446,7 +455,7 @@ func Test_replacementBootBound(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				_, a := newOutdatedRolloutAutoscaler(t, 4)
+				_, a := newOutdatedRolloutAutoscaler(t, 4, nil)
 				a.config.AgentCreationTimeout = tc.creation
 				a.config.AgentInactivityTimeout = tc.inactivity
 				require.NoError(t, a.Reconcile(t.Context()))
@@ -455,7 +464,7 @@ func Test_replacementBootBound(t *testing.T) {
 				if tc.bounded {
 					assert.Zero(t, a.outdatedDrainFailures)
 				} else {
-					assert.Equal(t, 1, a.outdatedDrainFailures)
+					assert.NotEmpty(t, a.outdatedDrainAgent)
 					assert.True(t, a.outdatedNoBoundWarned)
 				}
 				synctest.Sleep(2 * time.Second)
@@ -463,7 +472,7 @@ func Test_replacementBootBound(t *testing.T) {
 				if tc.bounded {
 					assert.Equal(t, 1, a.outdatedDrainFailures)
 				} else {
-					assert.Equal(t, 1, a.outdatedDrainFailures)
+					assert.NotEmpty(t, a.outdatedDrainAgent)
 				}
 			})
 		})
@@ -498,12 +507,12 @@ func Test_drainOutdatedAgents_reusedName(t *testing.T) {
 		outdatedDrainAgent:          replacement.Name,
 		outdatedDrainExistingAgents: map[string]int64{replacement.Name: 1},
 	}
-	require.NoError(t, a.drainOutdatedAgents(nil))
+	require.NoError(t, a.drainOutdatedAgents(nil, true))
 	assert.Empty(t, a.outdatedDrainAgent)
 }
 
 func Test_reconcile_replacesIdleOutdatedAgentAtMaxAgentsOne(t *testing.T) {
-	client, a := newOutdatedRolloutAutoscaler(t, 1)
+	client, a := newOutdatedRolloutAutoscaler(t, 1, nil)
 	oldAgent := a.agents["pool-1-agent-1"]
 	oldAgent.LastContact = time.Now().Unix()
 	oldAgent.NoSchedule = false
@@ -530,7 +539,7 @@ func Test_reconcile_replacesIdleOutdatedAgentAtMaxAgentsOne(t *testing.T) {
 	assert.False(t, replacement.NoSchedule)
 	assert.Len(t, a.agents, 1)
 }
-func newOutdatedRolloutAutoscaler(t *testing.T, agentCount int) (*mocks_server.MockClient, *Autoscaler) {
+func newOutdatedRolloutAutoscaler(t *testing.T, agentCount int, queue *woodpecker.Info) (*mocks_server.MockClient, *Autoscaler) {
 	t.Helper()
 	client := mocks_server.NewMockClient(t)
 	provider := &outdatedAgentTestProvider{MockProvider: mocks_provider.NewMockProvider(t)}
@@ -579,12 +588,15 @@ func newOutdatedRolloutAutoscaler(t *testing.T, agentCount int) (*mocks_server.M
 		}
 		return nil
 	}).Maybe()
-	client.On("QueueInfo").Return(&woodpecker.Info{Pending: []woodpecker.Task{
-		{Labels: map[string]string{"platform": "linux/amd64", "repo": "rigel/x", "org-id": "1"}},
-		{Labels: map[string]string{"platform": "linux/amd64", "repo": "rigel/x", "org-id": "1"}},
-		{Labels: map[string]string{"platform": "linux/amd64", "repo": "rigel/x", "org-id": "1"}},
-		{Labels: map[string]string{"platform": "linux/amd64", "repo": "rigel/x", "org-id": "1"}},
-	}}, nil)
+	if queue == nil {
+		queue = &woodpecker.Info{Pending: []woodpecker.Task{
+			{Labels: map[string]string{"platform": "linux/amd64", "repo": "rigel/x", "org-id": "1"}},
+			{Labels: map[string]string{"platform": "linux/amd64", "repo": "rigel/x", "org-id": "1"}},
+			{Labels: map[string]string{"platform": "linux/amd64", "repo": "rigel/x", "org-id": "1"}},
+			{Labels: map[string]string{"platform": "linux/amd64", "repo": "rigel/x", "org-id": "1"}},
+		}}
+	}
+	client.On("QueueInfo").Return(queue, nil)
 	client.On("AgentUpdate", mock.Anything).Return(func(agent *woodpecker.Agent) (*woodpecker.Agent, error) {
 		if existing, ok := serverAgents[agent.Name]; ok && existing.ID == agent.ID {
 			copy := *agent
@@ -628,10 +640,10 @@ func countNoSchedule(agents map[string]*woodpecker.Agent) int {
 	return count
 }
 
-func countMockCalls(calls []mock.Call, method string) int {
+func countDrainCalls(calls []mock.Call) int {
 	count := 0
 	for _, call := range calls {
-		if call.Method == method {
+		if call.Method == "AgentUpdate" && call.Arguments.Get(0).(*woodpecker.Agent).NoSchedule {
 			count++
 		}
 	}

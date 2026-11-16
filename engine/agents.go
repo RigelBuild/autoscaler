@@ -69,6 +69,8 @@ func (a *Autoscaler) replacementBootBound() time.Duration {
 	return a.config.AgentInactivityTimeout
 }
 
+// bootDeadlineExceeded reports whether an agent has been booting for longer
+// than the configured creation timeout. A zero timeout disables the deadline.
 func (a *Autoscaler) bootDeadlineExceeded(agent *woodpecker.Agent) bool {
 	return a.config.AgentCreationTimeout > 0 &&
 		time.Since(time.Unix(agent.Created, 0)) > a.config.AgentCreationTimeout
@@ -259,7 +261,7 @@ func (a *Autoscaler) outdatedAgentNames(ctx context.Context) (map[string]struct{
 
 // drainOutdatedAgents waits for each replacement to connect before draining
 // another agent. A busy drained agent deliberately stops rollout progress.
-func (a *Autoscaler) drainOutdatedAgents(outdated map[string]struct{}) error {
+func (a *Autoscaler) drainOutdatedAgents(outdated map[string]struct{}, quiet bool) error {
 	if a.outdatedDrainAgent != "" {
 		if drained, exists := a.agents[a.outdatedDrainAgent]; exists && drained.ID == a.outdatedDrainExistingAgents[a.outdatedDrainAgent] {
 			if a.outdatedDrainSince.IsZero() {
@@ -287,7 +289,7 @@ func (a *Autoscaler) drainOutdatedAgents(outdated map[string]struct{}) error {
 			}
 			replacementFound = true
 		}
-		if !replacementFound && a.outdatedReplacementAttempted {
+		if !replacementFound && (a.outdatedReplacementAttempted || !quiet) {
 			return nil
 		}
 		a.outdatedDrainAgent = ""
