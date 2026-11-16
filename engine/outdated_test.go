@@ -452,13 +452,18 @@ func Test_replacementBootBound(t *testing.T) {
 				require.NoError(t, a.Reconcile(t.Context()))
 				synctest.Sleep(59 * time.Second)
 				require.NoError(t, a.Reconcile(t.Context()))
-				assert.Zero(t, a.outdatedDrainFailures)
+				if tc.bounded {
+					assert.Zero(t, a.outdatedDrainFailures)
+				} else {
+					assert.Equal(t, 1, a.outdatedDrainFailures)
+					assert.True(t, a.outdatedNoBoundWarned)
+				}
 				synctest.Sleep(2 * time.Second)
 				require.NoError(t, a.Reconcile(t.Context()))
 				if tc.bounded {
 					assert.Equal(t, 1, a.outdatedDrainFailures)
 				} else {
-					assert.Zero(t, a.outdatedDrainFailures)
+					assert.Equal(t, 1, a.outdatedDrainFailures)
 				}
 			})
 		})
