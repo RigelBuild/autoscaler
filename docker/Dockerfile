@@ -3,6 +3,7 @@ FROM --platform=$BUILDPLATFORM golang:1.27 AS build
 WORKDIR /src
 COPY . .
 ARG TARGETOS TARGETARCH
+ARG CI_COMMIT_SHA CI_COMMIT_TAG
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg \
     make build
