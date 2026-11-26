@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"go.woodpecker-ci.org/autoscaler/engine/types"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline"
 )
 
 func Test_agentLabelsFor(t *testing.T) {
@@ -145,5 +146,55 @@ func Test_taskMatchesAgent(t *testing.T) {
 		assert.True(t, taskMatchesAgent(map[string]string{
 			"gpu": "true",
 		}, agent))
+	})
+}
+
+func Test_taskMatchesAgent_orgAgentsOnly(t *testing.T) {
+	wildcardOrgAgent := instanceAdminPoolScope().agentLabelsFor(dockerAmd64Cap, nil)
+
+	t.Run("org wildcard does not satisfy org-only task", func(t *testing.T) {
+		labels := serverTaskLabels(map[string]string{
+			pipeline.LabelFilterPlatform: "linux/amd64",
+			pipeline.LabelOrgAgentsOnly:  "true",
+		})
+		assert.False(t, taskMatchesAgent(labels, wildcardOrgAgent))
+	})
+
+	t.Run("missing task org does not satisfy org-only task", func(t *testing.T) {
+		labels := serverTaskLabels(map[string]string{
+			pipeline.LabelFilterPlatform: "linux/amd64",
+			pipeline.LabelOrgAgentsOnly:  "true",
+		})
+		delete(labels, pipeline.LabelFilterOrg)
+		assert.False(t, taskMatchesAgent(labels, wildcardOrgAgent))
+	})
+
+	t.Run("different concrete org does not satisfy org-only task", func(t *testing.T) {
+		orgAgent := poolScope{
+			enforcedLabels: map[string]string{pipeline.LabelFilterOrg: "456"},
+		}.agentLabelsFor(dockerAmd64Cap, nil)
+		labels := serverTaskLabels(map[string]string{
+			pipeline.LabelFilterPlatform: "linux/amd64",
+			pipeline.LabelOrgAgentsOnly:  "true",
+		})
+		assert.False(t, taskMatchesAgent(labels, orgAgent))
+	})
+
+	t.Run("matching concrete org satisfies org-only task", func(t *testing.T) {
+		orgAgent := poolScope{
+			enforcedLabels: map[string]string{pipeline.LabelFilterOrg: "123"},
+		}.agentLabelsFor(dockerAmd64Cap, nil)
+		labels := serverTaskLabels(map[string]string{
+			pipeline.LabelFilterPlatform: "linux/amd64",
+			pipeline.LabelOrgAgentsOnly:  "true",
+		})
+		assert.True(t, taskMatchesAgent(labels, orgAgent))
+	})
+
+	t.Run("ordinary internal labels remain ignored", func(t *testing.T) {
+		labels := serverTaskLabels(map[string]string{
+			pipeline.LabelFilterPlatform: "linux/amd64",
+		})
+		assert.True(t, taskMatchesAgent(labels, wildcardOrgAgent))
 	})
 }

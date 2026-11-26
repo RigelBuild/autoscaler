@@ -15,6 +15,7 @@ import (
 	"go.woodpecker-ci.org/autoscaler/engine/types"
 	mocks_provider "go.woodpecker-ci.org/autoscaler/engine/types/mocks"
 	mocks_server "go.woodpecker-ci.org/autoscaler/server/mocks"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline"
 	"go.woodpecker-ci.org/woodpecker/v3/woodpecker-go/woodpecker"
 )
 
@@ -431,6 +432,20 @@ func Test_reconcile_quietPoolContinuesRollout(t *testing.T) {
 
 func Test_reconcile_unmatchedPendingContinuesRollout(t *testing.T) {
 	queue := &woodpecker.Info{Pending: []woodpecker.Task{{Labels: map[string]string{"platform": "linux/arm64"}}}}
+	client, a := newOutdatedRolloutAutoscaler(t, 2, queue)
+	a.config.MinAgents = 1
+	require.NoError(t, a.Reconcile(t.Context()))
+	require.NoError(t, a.Reconcile(t.Context()))
+	assert.Equal(t, 2, countDrainCalls(t, client.Calls))
+}
+
+func Test_reconcile_orgAgentsOnlyPendingDoesNotPauseRollout(t *testing.T) {
+	queue := &woodpecker.Info{Pending: []woodpecker.Task{{
+		Labels: serverTaskLabels(map[string]string{
+			pipeline.LabelFilterPlatform: "linux/amd64",
+			pipeline.LabelOrgAgentsOnly:  "true",
+		}),
+	}}}
 	client, a := newOutdatedRolloutAutoscaler(t, 2, queue)
 	a.config.MinAgents = 1
 	require.NoError(t, a.Reconcile(t.Context()))

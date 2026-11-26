@@ -5,7 +5,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"go.woodpecker-ci.org/autoscaler/config"
 	"go.woodpecker-ci.org/autoscaler/engine/types"
+	"go.woodpecker-ci.org/woodpecker/v3/pipeline"
 	"go.woodpecker-ci.org/woodpecker/v3/woodpecker-go/woodpecker"
 )
 
@@ -52,6 +54,55 @@ func Test_routeTaskToBucket(t *testing.T) {
 		idx := routeTaskToBucket(woodpecker.Task{}, buckets)
 		assert.Equal(t, 0, idx)
 	})
+}
+
+func Test_routeTaskToBucket_orgAgentsOnly(t *testing.T) {
+	systemBuckets := instanceAdminBuckets(dockerAmd64Cap)
+	orgOnlyLabels := serverTaskLabels(map[string]string{
+		pipeline.LabelFilterPlatform: "linux/amd64",
+		pipeline.LabelOrgAgentsOnly:  "true",
+	})
+
+	assert.Equal(t, -1, routeTaskToBucket(woodpecker.Task{Labels: orgOnlyLabels}, systemBuckets))
+
+	missingOrgLabels := serverTaskLabels(map[string]string{
+		pipeline.LabelFilterPlatform: "linux/amd64",
+		pipeline.LabelOrgAgentsOnly:  "true",
+	})
+	delete(missingOrgLabels, pipeline.LabelFilterOrg)
+	assert.Equal(t, -1, routeTaskToBucket(woodpecker.Task{Labels: missingOrgLabels}, systemBuckets))
+
+	orgBuckets := []agentBucket{{
+		Capability: dockerAmd64Cap,
+		Labels: poolScope{
+			enforcedLabels: map[string]string{pipeline.LabelFilterOrg: "123"},
+		}.agentLabelsFor(dockerAmd64Cap, nil),
+	}}
+	assert.Equal(t, 0, routeTaskToBucket(woodpecker.Task{Labels: orgOnlyLabels}, orgBuckets))
+
+	regularOrgLabels := serverTaskLabels(map[string]string{
+		"platform": "linux/amd64",
+	})
+	assert.Equal(t, 0, routeTaskToBucket(woodpecker.Task{Labels: regularOrgLabels}, systemBuckets))
+}
+
+func Test_planScaling_orgAgentsOnlyWithEmptyPoolPlatform(t *testing.T) {
+	a := Autoscaler{
+		providerCapabilities: []types.Capability{dockerAmd64Cap},
+		scope:                instanceAdminPoolScope(),
+		config: &config.Config{
+			WorkflowsPerAgent: 1,
+			MaxAgents:         5,
+			MinAgents:         0,
+		},
+	}
+	taskLabels := serverTaskLabels(map[string]string{
+		pipeline.LabelFilterPlatform: "linux/amd64",
+		pipeline.LabelOrgAgentsOnly:  "true",
+	})
+
+	assert.Empty(t, a.config.PoolPlatform)
+	assert.Empty(t, a.planScaling([]woodpecker.Task{{Labels: taskLabels}}, nil, nil))
 }
 
 func Test_matchAgentToBucket(t *testing.T) {
