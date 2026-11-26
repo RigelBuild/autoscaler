@@ -382,6 +382,7 @@ func currentAgentNames(agents map[string]*woodpecker.Agent) map[string]int64 {
 	}
 	return names
 }
+
 func (a *Autoscaler) warnBootingReplacement(agent *woodpecker.Agent) {
 	timeout := a.replacementBootBound()
 	if timeout <= 0 || time.Since(time.Unix(agent.Created, 0)) <= timeout {
