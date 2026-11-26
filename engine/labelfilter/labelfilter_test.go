@@ -176,8 +176,35 @@ func TestMatchFilter(t *testing.T) {
 			wantMatched: true,
 			wantScore:   10,
 		},
+		{
+			name:        "Org agents only matches agent of the same org",
+			agentLabels: map[string]string{"org-id": "123", "platform": "linux"},
+			taskLabels:  map[string]string{"org-id": "123", "platform": "linux", pipeline.LabelOrgAgentsOnly: "true"},
+			wantMatched: true,
+			wantScore:   20,
+		},
+		{
+			name:        "Org agents only rejects system agent",
+			agentLabels: map[string]string{"org-id": "*", "platform": "linux"},
+			taskLabels:  map[string]string{"org-id": "123", "platform": "linux", pipeline.LabelOrgAgentsOnly: "true"},
+			wantMatched: false,
+			wantScore:   0,
+		},
+		{
+			name:        "Org agents only rejects agent of other org",
+			agentLabels: map[string]string{"org-id": "456", "platform": "linux"},
+			taskLabels:  map[string]string{"org-id": "123", "platform": "linux", pipeline.LabelOrgAgentsOnly: "true"},
+			wantMatched: false,
+			wantScore:   0,
+		},
+		{
+			name:        "Org agents only rejects agent without org label",
+			agentLabels: map[string]string{"platform": "linux"},
+			taskLabels:  map[string]string{"org-id": "123", "platform": "linux", pipeline.LabelOrgAgentsOnly: "true"},
+			wantMatched: false,
+			wantScore:   0,
+		},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			gotMatched, gotScore := matchFilter(tt.agentLabels, tt.taskLabels)

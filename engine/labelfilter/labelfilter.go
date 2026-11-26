@@ -54,7 +54,7 @@ const synthesizedLabels = 3
 // Not modeled: admin-set server-side agent filters (model.Agent.Filters), which
 // woodpecker-go does not expose. An agent with filters may be counted as able to
 // absorb tasks it would reject, under-provisioning the pool.
-const transliteratedFromVersion = "v3.19.0"
+const transliteratedFromVersion = "v3.20.1"
 
 // Filter is the effective label set an agent advertises to the scheduler: its
 // configured/custom labels plus the server/agent-stamped defaults (repo="*",
@@ -143,6 +143,15 @@ func matchFilter(agentLabels, taskLabels map[string]string) (bool, int) {
 
 	if requiredLabelsMissing(labels, agentLabels) {
 		return false, 0
+	}
+
+	// Org-only tasks require an agent from that exact organization. The normal
+	// org-id wildcard does not satisfy this restriction.
+	if labels[pipeline.LabelOrgAgentsOnly] == "true" {
+		taskOrgID := labels[pipeline.LabelFilterOrg]
+		if taskOrgID == "" || agentLabels[pipeline.LabelFilterOrg] != taskOrgID {
+			return false, 0
+		}
 	}
 
 	// ignore internal labels for filtering
