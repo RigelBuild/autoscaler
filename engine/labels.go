@@ -73,6 +73,7 @@ func agentLabelsFor(capability types.Capability, extraAgentLabels map[string]str
 //     configured value; this is checked first.
 //   - LabelOrgAgentsOnly requires a task's non-empty org-id to equal the
 //     agent's concrete org-id; a wildcard org-id does not satisfy it.
+//   - Empty workflow label values are ignored.
 //   - Other internal "woodpecker-ci.org/*" labels are ignored.
 //   - For every remaining workflow label, the agent must advertise the same
 //     key (a mandatory key counts too) with a matching value or the wildcard.
