@@ -5,6 +5,7 @@
 ### 🐛 Bug Fixes
 
 - Replace idle outdated agents in the same scaler cycle, and wait for replacements to connect before draining the next agent. Failed boots are removed and retried without advancing the rollout; the pool never exceeds `MaxAgents` (RIG-10331).
+- Document `WOODPECKER_OPENSTACK_NETWORK_REF` as the replacement for `WOODPECKER_OPENSTACK_NETWORK`.
 
 ## [2.1.0](https://github.com/woodpecker-ci/autoscaler/releases/tag/2.1.0) - 2026-11-16
 

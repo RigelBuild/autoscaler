@@ -71,17 +71,21 @@ func agentLabelsFor(capability types.Capability, extraAgentLabels map[string]str
 // woodpecker server scheduler (server/scheduler/filter.go):
 //   - Every mandatory ("!"-prefixed) key must be present with the exact
 //     configured value; this is checked first.
-//   - Internal "woodpecker-ci.org/*" labels are ignored.
+//   - LabelOrgAgentsOnly requires a task's non-empty org-id to equal the
+//     agent's concrete org-id; a wildcard org-id does not satisfy it.
 //   - Empty workflow label values are ignored.
+//   - Other internal "woodpecker-ci.org/*" labels are ignored.
 //   - For every remaining workflow label, the agent must advertise the same
 //     key (a mandatory key counts too) with a matching value or the wildcard.
-//
-// Scope labels the server enforces (e.g. "org-id=*" for a global agent) are
-// already baked into the agent label set by poolScope.agentLabelsFor, so this
-// matcher stays scope-agnostic.
 func taskMatchesAgent(taskLabels map[string]string, agent agentLabelSet) bool {
 	for key, required := range agent.Mandatory {
 		if v, ok := taskLabels[key]; !ok || v != required {
+			return false
+		}
+	}
+	if taskLabels[pipeline.LabelOrgAgentsOnly] == "true" {
+		taskOrgID := taskLabels[pipeline.LabelFilterOrg]
+		if taskOrgID == "" || agent.Labels[pipeline.LabelFilterOrg] != taskOrgID {
 			return false
 		}
 	}
